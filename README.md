@@ -6,7 +6,8 @@ C'est la **phase 3** du projet FireRisk DZ. Les données sont produites par le p
 
 ## Fonctionnalités
 
-- 🗺️ **Carte choroplèthe du risque par wilaya** — score combinant fréquence historique de feu pour le mois en cours (55%) et anomalie météo récente vs climatologie (45%) ; 4 niveaux (faible → très élevé), wilayas sahariennes hors périmètre
+- 🗺️ **Carte choroplèthe du risque par wilaya** — score combinant fréquence historique de feu pour le mois en cours (55%) et anomalie de la **météo du jour (prévision Open-Meteo)** vs climatologie (45%) ; 4 niveaux (faible → très élevé), wilayas sahariennes hors périmètre
+- 🔮 **Perspectives à 7 jours** — heatmap wilaya × jour du score de risque calculé sur les prévisions météo (requête groupée Open-Meteo, cache 1 h, repli automatique sur les données historiques si l'API est injoignable)
 - 📍 **Détail par wilaya** — météo récente, saisonnalité des feux, température vs feux par mois, évolution annuelle 2001-2026
 - 📉 **Tendances nationales** — jours-feu par an croisés avec la température estivale (tendance ~+0,9 °C/décennie sur la zone forestière), années exceptionnelles 2021/2023 annotées, distinction visuelle MODIS (2001-2014) / VIIRS (2015+, capteur ~5× plus sensible : comptages non directement comparables entre les deux ères)
 - 🗓️ **Heatmap saisonnière** année × mois sur 26 ans
@@ -28,6 +29,6 @@ Pour rafraîchir les données, relancer le pipeline de [firerisk-dz-data](https:
 
 ## Avertissement méthodologique
 
-Le score de risque est un **indicateur analytique historique**, pas une prévision : il s'appuie sur la dernière météo disponible dans le jeu de données (J-1) et la fréquence historique du mois. Un modèle prédictif entraîné (phase 4 du projet) et l'intégration des prévisions météo à 7 jours viendront le compléter.
+Le score de risque est un **indicateur heuristique** : il croise la fréquence historique de feu du mois avec l'anomalie des prévisions météo par rapport à la climatologie 2000-2026. Ce n'est pas encore un modèle prédictif entraîné (phase 4 du projet) — les pondérations (55/45) sont fixées à dire d'expert, pas apprises sur les données.
 
 `fire_detected` provient de la détection satellite (MODIS 1 km avant 2015, VIIRS 375 m après), pas des incendies officiellement déclarés. Voir le README de [firerisk-dz-data](https://github.com/kenzakab16/firerisk-dz-data) pour la méthodologie complète (filtrage des torchères de gaz, limites de couverture).

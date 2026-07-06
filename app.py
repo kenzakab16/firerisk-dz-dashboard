@@ -75,15 +75,96 @@ wilayas, geojson, ml = load_data()
 LAST_DATE = ml["date"].max()
 MOIS_FR = {1: "Jan", 2: "Fév", 3: "Mar", 4: "Avr", 5: "Mai", 6: "Juin",
            7: "Juil", 8: "Août", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Déc"}
+JOURS_FR = {0: "Lun", 1: "Mar", 2: "Mer", 3: "Jeu", 4: "Ven", 5: "Sam", 6: "Dim"}
+
+
+# ---------- Prévisions météo 7 jours (Open-Meteo, requête groupée) ----------
+@st.cache_data(ttl=3600, show_spinner="Récupération des prévisions météo...")
+def fetch_forecast(wilayas: pd.DataFrame):
+    """Prévisions quotidiennes à 7 jours pour toutes les wilayas en une
+    seule requête groupée. Retourne None si l'API est injoignable
+    (le dashboard retombe alors sur la dernière météo du jeu de données)."""
+    import urllib.request
+    lats = ",".join(f"{v:.4f}" for v in wilayas["centroid_lat"])
+    lons = ",".join(f"{v:.4f}" for v in wilayas["centroid_lon"])
+    url = (
+        "https://api.open-meteo.com/v1/forecast"
+        f"?latitude={lats}&longitude={lons}"
+        "&daily=temperature_2m_max,relative_humidity_2m_mean,wind_speed_10m_max,precipitation_sum"
+        "&forecast_days=7&timezone=Africa%2FAlgiers"
+    )
+    try:
+        with urllib.request.urlopen(url, timeout=20) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return None
+    if not isinstance(data, list) or len(data) != len(wilayas):
+        return None
+    rows = []
+    for w, loc in zip(wilayas.itertuples(), data):
+        d = loc["daily"]
+        for i, day in enumerate(d["time"]):
+            rows.append({
+                "wilaya_id": w.wilaya_id, "date": day,
+                "temperature_2m_max": d["temperature_2m_max"][i],
+                "relative_humidity_2m_mean": d["relative_humidity_2m_mean"][i],
+                "wind_speed_10m_max": d["wind_speed_10m_max"][i],
+                "precipitation_sum": d["precipitation_sum"][i],
+            })
+    fc = pd.DataFrame(rows)
+    fc["date"] = pd.to_datetime(fc["date"])
+    return fc
+
+
+@st.cache_data
+def compute_climatology(ml: pd.DataFrame):
+    """Climatologie mensuelle par wilaya : fréquence historique de feu et
+    moyenne/écart-type des variables météo, base de l'anomalie."""
+    g = ml.groupby(["wilaya_id", "month"])
+    clim = g.agg(
+        freq_fire=("fire_detected", "mean"),
+        temp_mean=("temperature_2m_max", "mean"), temp_std=("temperature_2m_max", "std"),
+        hum_mean=("relative_humidity_2m_mean", "mean"), hum_std=("relative_humidity_2m_mean", "std"),
+        wind_mean=("wind_speed_10m_max", "mean"), wind_std=("wind_speed_10m_max", "std"),
+    ).reset_index()
+    for c in ["temp_std", "hum_std", "wind_std"]:
+        clim[c] = clim[c].replace(0, 1).fillna(1)
+    return clim
+
+
+forecast = fetch_forecast(wilayas)
 
 
 # ---------- Calcul du score de risque par wilaya ----------
+def score_to_level(s, is_forest):
+    if not is_forest:
+        return "Hors périmètre"
+    if s >= 75:
+        return "Très élevé"
+    if s >= 50:
+        return "Élevé"
+    if s >= 25:
+        return "Modéré"
+    return "Faible"
+
+
 @st.cache_data
-def compute_risk(ml: pd.DataFrame, wilayas: pd.DataFrame, current_month: int):
+def compute_risk(ml: pd.DataFrame, wilayas: pd.DataFrame, current_month: int,
+                 current_weather: pd.DataFrame | None):
+    """Score de risque par wilaya. `current_weather` (wilaya_id, temp,
+    humidity, wind) vient des prévisions du jour si disponibles ; sinon
+    on retombe sur la dernière ligne du jeu de données historique."""
+    cw = current_weather.set_index("wilaya_id") if current_weather is not None else None
     rows = []
     for wid, g in ml.groupby("wilaya_id"):
         w = wilayas.loc[wilayas["wilaya_id"] == wid].iloc[0]
-        latest = g.loc[g["date"] == g["date"].max()].iloc[0]
+        if cw is not None and wid in cw.index:
+            temp, hum, wind = cw.loc[wid, ["temp", "humidity", "wind"]]
+        else:
+            latest = g.loc[g["date"] == g["date"].max()].iloc[0]
+            temp = latest["temperature_2m_max"]
+            hum = latest["relative_humidity_2m_mean"]
+            wind = latest["wind_speed_10m_max"]
 
         month_hist = g[g["month"] == current_month]
         freq_month = month_hist["fire_detected"].mean() if len(month_hist) else 0.0
@@ -91,16 +172,15 @@ def compute_risk(ml: pd.DataFrame, wilayas: pd.DataFrame, current_month: int):
         clim = month_hist[["temperature_2m_max", "relative_humidity_2m_mean", "wind_speed_10m_max"]].mean()
         clim_std = month_hist[["temperature_2m_max", "relative_humidity_2m_mean", "wind_speed_10m_max"]].std().replace(0, 1)
 
-        temp_z = (latest["temperature_2m_max"] - clim["temperature_2m_max"]) / clim_std["temperature_2m_max"]
-        humidity_z = -(latest["relative_humidity_2m_mean"] - clim["relative_humidity_2m_mean"]) / clim_std["relative_humidity_2m_mean"]
-        wind_z = (latest["wind_speed_10m_max"] - clim["wind_speed_10m_max"]) / clim_std["wind_speed_10m_max"]
+        temp_z = (temp - clim["temperature_2m_max"]) / clim_std["temperature_2m_max"]
+        humidity_z = -(hum - clim["relative_humidity_2m_mean"]) / clim_std["relative_humidity_2m_mean"]
+        wind_z = (wind - clim["wind_speed_10m_max"]) / clim_std["wind_speed_10m_max"]
         weather_anomaly = np.clip((temp_z + humidity_z + wind_z) / 3, -2, 2)
 
         rows.append({
             "wilaya_id": wid, "wilaya_name": w["wilaya_name"], "is_forest_zone": w["is_forest_zone"],
             "freq_month": freq_month, "weather_anomaly": weather_anomaly,
-            "latest_temp": latest["temperature_2m_max"], "latest_humidity": latest["relative_humidity_2m_mean"],
-            "latest_wind": latest["wind_speed_10m_max"],
+            "latest_temp": temp, "latest_humidity": hum, "latest_wind": wind,
             "total_fire_days": g["fire_detected"].sum(), "total_detections": g["nb_detections"].sum(),
             "total_frp": g["frp_total"].sum(),
         })
@@ -113,32 +193,33 @@ def compute_risk(ml: pd.DataFrame, wilayas: pd.DataFrame, current_month: int):
         forest["risk_score"] = (0.55 * freq_pct + 0.45 * anomaly_pct) * 100
         df.loc[forest.index, "risk_score"] = forest["risk_score"]
 
-    def level(row):
-        if not row["is_forest_zone"]:
-            return "Hors périmètre"
-        s = row["risk_score"]
-        if s >= 75:
-            return "Très élevé"
-        if s >= 50:
-            return "Élevé"
-        if s >= 25:
-            return "Modéré"
-        return "Faible"
-
-    df["risk_level"] = df.apply(level, axis=1)
+    df["risk_level"] = df.apply(lambda r: score_to_level(r.get("risk_score", 0), r["is_forest_zone"]), axis=1)
     return df
 
 
-risk_df = compute_risk(ml, wilayas, LAST_DATE.month)
+if forecast is not None:
+    today_fc = forecast[forecast["date"] == forecast["date"].min()]
+    current_weather = today_fc.rename(columns={
+        "temperature_2m_max": "temp", "relative_humidity_2m_mean": "humidity",
+        "wind_speed_10m_max": "wind",
+    })[["wilaya_id", "temp", "humidity", "wind"]]
+    RISK_DATE = forecast["date"].min()
+    WEATHER_SOURCE = "prévision Open-Meteo du jour"
+else:
+    current_weather = None
+    RISK_DATE = LAST_DATE
+    WEATHER_SOURCE = f"dernière météo du jeu de données ({LAST_DATE.strftime('%d/%m/%Y')}) — API de prévision injoignable"
+
+risk_df = compute_risk(ml, wilayas, RISK_DATE.month, current_weather)
 
 # ---------- En-tête ----------
 st.markdown(f"""
 <div class="hero">
     <h1>🔥 FireRisk DZ — Risque incendie de forêt par wilaya</h1>
     <p>
-        Tableau de bord analytique (historique 2000–{LAST_DATE.year}) &nbsp;·&nbsp;
-        Météo : Open-Meteo (ERA5) &nbsp;·&nbsp; Incendies : NASA FIRMS (VIIRS SNPP + NOAA-20 + NOAA-21) &nbsp;·&nbsp;
-        Dernières données : {LAST_DATE.strftime('%d/%m/%Y')}
+        Historique 2000–{LAST_DATE.year} + prévisions 7 jours &nbsp;·&nbsp;
+        Météo : Open-Meteo (ERA5 + prévisions) &nbsp;·&nbsp; Incendies : NASA FIRMS (MODIS + VIIRS) &nbsp;·&nbsp;
+        Risque évalué au {RISK_DATE.strftime('%d/%m/%Y')} ({WEATHER_SOURCE})
     </p>
 </div>
 """, unsafe_allow_html=True)
@@ -168,10 +249,58 @@ fig_map.update_layout(height=520, margin=dict(l=0, r=0, t=0, b=0), paper_bgcolor
                        legend=dict(orientation="h", y=-0.02, font=dict(color="#e8ebee")))
 st.plotly_chart(fig_map, use_container_width=True)
 st.caption(
-    "Score de risque = fréquence historique de feu pour le mois en cours (55%) + anomalie météo récente "
-    "vs climatologie du mois (45%, température↑/humidité↓/vent↑). Indicateur analytique historique, "
-    "pas une prévision — un modèle prédictif (phase IA) viendra en complément."
+    f"Score de risque = fréquence historique de feu pour le mois en cours (55%) + anomalie de la météo "
+    f"du jour vs climatologie du mois (45%, température↑/humidité↓/vent↑). Météo du jour : {WEATHER_SOURCE}. "
+    "Indicateur heuristique — un modèle prédictif entraîné (phase IA) viendra en complément."
 )
+
+st.divider()
+
+# ---------- Perspectives 7 jours ----------
+if forecast is not None:
+    section_title("🔮", "Perspectives à 7 jours (prévisions Open-Meteo)")
+    clim = compute_climatology(ml)
+    fc = forecast.copy()
+    fc["month"] = fc["date"].dt.month
+    fc = fc.merge(clim, on=["wilaya_id", "month"], how="left")
+    fc = fc.merge(wilayas[["wilaya_id", "wilaya_name", "is_forest_zone"]], on="wilaya_id")
+    fc = fc[fc["is_forest_zone"]].copy()
+
+    temp_z = (fc["temperature_2m_max"] - fc["temp_mean"]) / fc["temp_std"]
+    hum_z = -(fc["relative_humidity_2m_mean"] - fc["hum_mean"]) / fc["hum_std"]
+    wind_z = (fc["wind_speed_10m_max"] - fc["wind_mean"]) / fc["wind_std"]
+    fc["weather_anomaly"] = np.clip((temp_z + hum_z + wind_z) / 3, -2, 2)
+
+    # Score par jour : percentiles calculés jour par jour, comme pour la carte
+    fc["freq_pct"] = fc.groupby("date")["freq_fire"].rank(pct=True)
+    fc["anomaly_pct"] = fc.groupby("date")["weather_anomaly"].rank(pct=True)
+    fc["risk_score"] = (0.55 * fc["freq_pct"] + 0.45 * fc["anomaly_pct"]) * 100
+
+    outlook = fc.pivot_table(index="wilaya_name", columns="date", values="risk_score")
+    outlook = outlook.loc[outlook.mean(axis=1).sort_values(ascending=False).index]
+    day_labels = [f"{JOURS_FR[d.weekday()]} {d.strftime('%d/%m')}" for d in outlook.columns]
+
+    fig_outlook = go.Figure(go.Heatmap(
+        z=outlook.values, x=day_labels, y=outlook.index,
+        colorscale=[[0, "#2e7d32"], [0.25, "#4caf50"], [0.5, "#ffca28"], [0.75, "#ff9800"], [1, "#e53935"]],
+        zmin=0, zmax=100, colorbar=dict(title="Score"),
+        hovertemplate="%{y} — %{x} : score %{z:.0f}/100<extra></extra>",
+    ))
+    fig_outlook.update_layout(
+        template="plotly_dark", paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
+        height=760, margin=dict(t=20, l=10, r=10, b=10),
+        yaxis=dict(autorange="reversed", tickfont=dict(size=11)),
+    )
+    st.plotly_chart(fig_outlook, use_container_width=True)
+
+    top3 = outlook.mean(axis=1).head(3)
+    st.caption(
+        f"Score de risque quotidien (0-100) par wilaya forestière, calculé sur les prévisions météo à 7 jours "
+        f"croisées avec la climatologie 2000-2026. Wilayas classées par risque moyen décroissant — "
+        f"à surveiller cette semaine : {', '.join(top3.index)}. Prévisions rafraîchies toutes les heures."
+    )
+else:
+    st.info("⚠️ API de prévision Open-Meteo injoignable — les perspectives à 7 jours seront affichées au prochain rechargement avec connexion.")
 
 st.divider()
 
@@ -185,10 +314,11 @@ sel = risk_df[risk_df["wilaya_name"] == selected_name].iloc[0]
 sel_ml = ml[ml["wilaya_id"] == sel["wilaya_id"]].copy()
 
 icon = RISK_ICONS[sel["risk_level"]]
+meteo_suffix = "aujourd'hui (prévision)" if forecast is not None else "connue"
 d1, d2, d3, d4, d5 = st.columns(5)
-d1.metric("🌡️ Dernière temp. max connue", f'{sel["latest_temp"]:.1f} °C')
-d2.metric("💧 Dernière humidité connue", f'{sel["latest_humidity"]:.0f} %')
-d3.metric("💨 Dernier vent connu", f'{sel["latest_wind"]:.0f} km/h')
+d1.metric(f"🌡️ Temp. max {meteo_suffix}", f'{sel["latest_temp"]:.1f} °C')
+d2.metric(f"💧 Humidité {meteo_suffix}", f'{sel["latest_humidity"]:.0f} %')
+d3.metric(f"💨 Vent max {meteo_suffix}", f'{sel["latest_wind"]:.0f} km/h')
 d4.metric("🔥 Jours avec feu (2000-2026)", int(sel["total_fire_days"]))
 d5.metric(f"{icon} Niveau de risque actuel", sel["risk_level"])
 
