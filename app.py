@@ -85,12 +85,20 @@ def fetch_forecast(wilayas: pd.DataFrame):
     seule requête groupée. Retourne None si l'API est injoignable
     (le dashboard retombe alors sur la dernière météo du jeu de données)."""
     import urllib.request
+    daily_vars = [
+        "temperature_2m_max", "temperature_2m_min", "temperature_2m_mean",
+        "relative_humidity_2m_mean",
+        "wind_speed_10m_max", "wind_gusts_10m_max", "wind_direction_10m_dominant",
+        "precipitation_sum", "rain_sum",
+        "sunshine_duration", "shortwave_radiation_sum",
+        "et0_fao_evapotranspiration", "surface_pressure_mean",
+    ]
     lats = ",".join(f"{v:.4f}" for v in wilayas["centroid_lat"])
     lons = ",".join(f"{v:.4f}" for v in wilayas["centroid_lon"])
     url = (
         "https://api.open-meteo.com/v1/forecast"
         f"?latitude={lats}&longitude={lons}"
-        "&daily=temperature_2m_max,relative_humidity_2m_mean,wind_speed_10m_max,precipitation_sum"
+        f"&daily={','.join(daily_vars)}"
         "&forecast_days=7&timezone=Africa%2FAlgiers"
     )
     try:
@@ -104,13 +112,10 @@ def fetch_forecast(wilayas: pd.DataFrame):
     for w, loc in zip(wilayas.itertuples(), data):
         d = loc["daily"]
         for i, day in enumerate(d["time"]):
-            rows.append({
-                "wilaya_id": w.wilaya_id, "date": day,
-                "temperature_2m_max": d["temperature_2m_max"][i],
-                "relative_humidity_2m_mean": d["relative_humidity_2m_mean"][i],
-                "wind_speed_10m_max": d["wind_speed_10m_max"][i],
-                "precipitation_sum": d["precipitation_sum"][i],
-            })
+            row = {"wilaya_id": w.wilaya_id, "date": day}
+            for v in daily_vars:
+                row[v] = d[v][i]
+            rows.append(row)
     fc = pd.DataFrame(rows)
     fc["date"] = pd.to_datetime(fc["date"])
     return fc
@@ -133,6 +138,49 @@ def compute_climatology(ml: pd.DataFrame):
 
 
 forecast = fetch_forecast(wilayas)
+
+
+# ---------- Modèle prédictif (phase IA) ----------
+@st.cache_resource
+def load_model():
+    """Charge le modèle entraîné (HistGradientBoosting, ère VIIRS 2015-2023,
+    testé sur 2024-2026). Retourne (None, None) si l'artefact est absent."""
+    import joblib
+    try:
+        model = joblib.load("model_fire_risk_v1.joblib")
+        with open("model_fire_risk_v1_meta.json", encoding="utf-8") as f:
+            meta = json.load(f)
+        return model, meta
+    except Exception:
+        return None, None
+
+
+MODEL_WEATHER_FEATURES = [
+    "temperature_2m_max", "temperature_2m_min", "temperature_2m_mean",
+    "relative_humidity_2m_mean",
+    "wind_speed_10m_max", "wind_gusts_10m_max", "wind_direction_10m_dominant",
+    "precipitation_sum", "rain_sum",
+    "sunshine_duration", "shortwave_radiation_sum",
+    "et0_fao_evapotranspiration", "surface_pressure_mean",
+]
+
+
+def predict_fire_proba(model, fc: pd.DataFrame, wilayas: pd.DataFrame):
+    """Applique le modèle aux prévisions : mêmes features qu'à
+    l'entraînement (météo prévue + saisonnalité + statiques wilaya)."""
+    forest = wilayas[wilayas["is_forest_zone"]]
+    df = fc.merge(forest[["wilaya_id", "wilaya_name", "centroid_lat", "centroid_lon", "area_km2"]],
+                  on="wilaya_id", how="inner")
+    X = df[MODEL_WEATHER_FEATURES + ["centroid_lat", "centroid_lon", "area_km2"]].copy()
+    month = df["date"].dt.month
+    X["month_sin"] = np.sin(2 * np.pi * month / 12)
+    X["month_cos"] = np.cos(2 * np.pi * month / 12)
+    X["wilaya_id"] = pd.Categorical(df["wilaya_id"], categories=sorted(forest["wilaya_id"]))
+    df["fire_proba"] = model.predict_proba(X)[:, 1]
+    return df[["wilaya_id", "wilaya_name", "date", "fire_proba"]]
+
+
+ml_model, ml_meta = load_model()
 
 
 # ---------- Calcul du score de risque par wilaya ----------
@@ -301,6 +349,44 @@ if forecast is not None:
     )
 else:
     st.info("⚠️ API de prévision Open-Meteo injoignable — les perspectives à 7 jours seront affichées au prochain rechargement avec connexion.")
+
+st.divider()
+
+# ---------- Prédiction IA ----------
+if forecast is not None and ml_model is not None:
+    section_title("🤖", "Prédiction IA — probabilité d'incendie à 7 jours")
+    preds = predict_fire_proba(ml_model, forecast, wilayas)
+    proba_matrix = preds.pivot_table(index="wilaya_name", columns="date", values="fire_proba") * 100
+    proba_matrix = proba_matrix.loc[proba_matrix.mean(axis=1).sort_values(ascending=False).index]
+    day_labels_ml = [f"{JOURS_FR[d.weekday()]} {d.strftime('%d/%m')}" for d in proba_matrix.columns]
+
+    fig_ml = go.Figure(go.Heatmap(
+        z=proba_matrix.values, x=day_labels_ml, y=proba_matrix.index,
+        colorscale="YlOrRd", zmin=0, zmax=60,
+        colorbar=dict(title="P(feu) %"),
+        text=np.round(proba_matrix.values).astype(int), texttemplate="%{text}",
+        textfont=dict(size=9),
+        hovertemplate="%{y} — %{x} : %{z:.0f}%% de probabilité d'au moins une détection<extra></extra>",
+    ))
+    fig_ml.update_layout(
+        template="plotly_dark", paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
+        height=760, margin=dict(t=20, l=10, r=10, b=10),
+        yaxis=dict(autorange="reversed", tickfont=dict(size=11)),
+    )
+    st.plotly_chart(fig_ml, use_container_width=True)
+
+    m = ml_meta["metrics"]
+    top3_ml = proba_matrix.mean(axis=1).head(3)
+    st.caption(
+        f"Probabilité qu'au moins un feu de végétation soit détecté par satellite dans la wilaya ce jour-là, "
+        f"prédite par un modèle de gradient boosting entraîné sur 2015-2023 (ère VIIRS) et évalué sur "
+        f"2024-2026 jamais vues : ROC-AUC {m['roc_auc_test']:.2f}, PR-AUC {m['pr_auc_test']:.2f} "
+        f"(taux de base {m['base_rate_test']*100:.0f}%). Wilayas les plus à risque selon le modèle : "
+        f"{', '.join(top3_ml.index)}. Contrairement au score heuristique ci-dessus (pondérations fixes), "
+        f"ces probabilités sont apprises sur les données."
+    )
+elif forecast is not None:
+    st.info("Modèle prédictif non trouvé (model_fire_risk_v1.joblib) — section IA masquée.")
 
 st.divider()
 
