@@ -2,6 +2,8 @@
 
 Tableau de bord Streamlit d'analyse du risque incendie de forêt en Algérie, par wilaya, basé sur 26 ans de données réelles (2000 → aujourd'hui).
 
+🌐 **Application en ligne : [firerisk-dz-dashboard.streamlit.app](https://firerisk-dz-dashboard-ecgkns5pblbymjjfimagzn.streamlit.app/)**
+
 C'est la **phase 3** du projet FireRisk DZ. Les données sont produites par le pipeline ETL du dépôt [firerisk-dz-data](https://github.com/kenzakab16/firerisk-dz-data) (météo Open-Meteo/ERA5 + détections NASA FIRMS MODIS/VIIRS, filtrées des torchères industrielles).
 
 ## Fonctionnalités
