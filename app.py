@@ -59,19 +59,40 @@ def section_title(icon: str, text: str):
 
 
 # ---------- Chargement des données ----------
-@st.cache_data
+DATA_REPO_RAW = "https://raw.githubusercontent.com/kenzakab16/firerisk-dz-data/master/data/processed"
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner="Chargement des données...")
 def load_data():
+    """Historique figé (2000-2025, embarqué dans le dépôt) + année en cours
+    récupérée depuis le dépôt de données (mis à jour quotidiennement par
+    GitHub Actions), avec repli sur la copie locale si GitHub est
+    injoignable. Cache 6 h : suit les mises à jour sans redéploiement."""
+    import io
+    import urllib.request
+
     wilayas = pd.read_csv("wilayas.csv")
     with open("wilayas_simplified.geojson", encoding="utf-8") as f:
         geojson = json.load(f)
-    ml = pd.read_parquet("ml_table_daily_wilaya_2000_2026.parquet")
+
+    frozen = pd.read_parquet("ml_table_daily_wilaya_2000_2025.parquet")
+    try:
+        with urllib.request.urlopen(f"{DATA_REPO_RAW}/ml_table_current_year.parquet", timeout=30) as r:
+            current = pd.read_parquet(io.BytesIO(r.read()))
+        data_source = "données feu du jour via GitHub"
+    except Exception:
+        current = pd.read_parquet("ml_table_current_year.parquet")
+        data_source = "copie locale (GitHub injoignable)"
+
+    ml = pd.concat([frozen, current], ignore_index=True)
     ml["date"] = pd.to_datetime(ml["date"])
+    ml = ml.drop_duplicates(subset=["wilaya_id", "date"], keep="last")
     ml["month"] = ml["date"].dt.month
     ml["year"] = ml["date"].dt.year
-    return wilayas, geojson, ml
+    return wilayas, geojson, ml, data_source
 
 
-wilayas, geojson, ml = load_data()
+wilayas, geojson, ml, DATA_SOURCE = load_data()
 LAST_DATE = ml["date"].max()
 MOIS_FR = {1: "Jan", 2: "Fév", 3: "Mar", 4: "Avr", 5: "Mai", 6: "Juin",
            7: "Juil", 8: "Août", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Déc"}
@@ -267,7 +288,8 @@ st.markdown(f"""
     <p>
         Historique 2000–{LAST_DATE.year} + prévisions 7 jours &nbsp;·&nbsp;
         Météo : Open-Meteo (ERA5 + prévisions) &nbsp;·&nbsp; Incendies : NASA FIRMS (MODIS + VIIRS) &nbsp;·&nbsp;
-        Risque évalué au {RISK_DATE.strftime('%d/%m/%Y')} ({WEATHER_SOURCE})
+        Risque évalué au {RISK_DATE.strftime('%d/%m/%Y')} ({WEATHER_SOURCE}) &nbsp;·&nbsp;
+        Historique feu jusqu'au {LAST_DATE.strftime('%d/%m/%Y')} ({DATA_SOURCE})
     </p>
 </div>
 """, unsafe_allow_html=True)
