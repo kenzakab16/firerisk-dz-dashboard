@@ -14,12 +14,13 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-st.set_page_config(page_title="FireRisk DZ — Tableau de bord national", page_icon="🔥", layout="wide")
+st.set_page_config(page_title="FireRisk DZ", page_icon="🔥", layout="wide", initial_sidebar_state="collapsed")
 
 # ---------- Palette & styles ----------
 ACCENT = "#ff7a45"
 CARD_BG = "#171c22"
-BORDER = "rgba(255,255,255,0.06)"
+BG = "#0f1216"
+BORDER = "rgba(255,255,255,0.07)"
 RISK_COLORS = {
     "Faible": "#4caf50",
     "Modéré": "#ffca28",
@@ -31,31 +32,62 @@ RISK_ICONS = {"Faible": "🟢", "Modéré": "🟡", "Élevé": "🟠", "Très é
 
 st.markdown(f"""
 <style>
-    .block-container {{ padding-top: 1.5rem; padding-bottom: 3rem; max-width: 1400px; }}
-    .hero {{
-        background: linear-gradient(120deg, rgba(255,122,69,0.16), rgba(23,28,34,0.0) 70%), {CARD_BG};
-        border: 1px solid {BORDER}; border-radius: 16px; padding: 26px 30px; margin-bottom: 24px;
+    .block-container {{
+        padding-top: 0.6rem; padding-bottom: 1.5rem;
+        padding-left: 1.4rem; padding-right: 1.4rem;
+        max-width: 100% !important;
     }}
-    .hero h1 {{ font-size: 1.8rem; margin: 0 0 6px 0; font-weight: 800;
+    #MainMenu {{visibility: hidden;}}
+    header[data-testid="stHeader"] {{ height: 0; }}
+
+    .topbar {{
+        display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap;
+        gap: 6px 18px; background: {CARD_BG}; border: 1px solid {BORDER}; border-radius: 10px;
+        padding: 8px 16px; margin-bottom: 10px;
+    }}
+    .topbar h1 {{
+        font-size: 1.25rem; margin: 0; font-weight: 800; white-space: nowrap;
         background: linear-gradient(90deg, #ffffff, #ffb347);
-        -webkit-background-clip: text; -webkit-text-fill-color: transparent; }}
-    .hero p {{ color: #9aa4af; font-size: 0.85rem; margin: 0; }}
-    div[data-testid="stMetric"] {{
-        background: {CARD_BG}; border: 1px solid {BORDER}; border-top: 3px solid {ACCENT};
-        border-radius: 12px; padding: 14px 16px 10px 16px; box-shadow: 0 4px 14px rgba(0,0,0,0.25);
+        -webkit-background-clip: text; -webkit-text-fill-color: transparent;
     }}
-    div[data-testid="stMetric"] label {{ color: #9aa4af !important; font-size: 0.75rem !important; }}
-    div[data-testid="stMetricValue"] {{ font-size: 1.5rem !important; font-weight: 700 !important; }}
-    .section-title {{ display: flex; align-items: center; gap: 10px; margin: 6px 0 12px 0;
-        font-size: 1.1rem; font-weight: 700; color: #e8ebee; }}
-    .section-title .bar {{ width: 4px; height: 18px; border-radius: 2px; background: {ACCENT}; }}
-    hr {{ border-color: {BORDER} !important; margin: 26px 0 !important; }}
+    .topbar .meta {{ color: #8b95a1; font-size: 0.72rem; line-height: 1.3; text-align: right; }}
+
+    div[data-testid="stMetric"] {{
+        background: {CARD_BG}; border: 1px solid {BORDER}; border-top: 2px solid {ACCENT};
+        border-radius: 8px; padding: 8px 12px 6px 12px;
+    }}
+    div[data-testid="stMetric"] label {{ color: #9aa4af !important; font-size: 0.68rem !important; }}
+    div[data-testid="stMetricValue"] {{ font-size: 1.25rem !important; font-weight: 700 !important; }}
+
+    .section-title {{
+        display: flex; align-items: center; gap: 8px; margin: 2px 0 8px 0;
+        font-size: 0.92rem; font-weight: 700; color: #e8ebee; text-transform: uppercase; letter-spacing: 0.03em;
+    }}
+    .section-title .bar {{ width: 3px; height: 14px; border-radius: 2px; background: {ACCENT}; }}
+
+    div[data-testid="stVerticalBlockBorderWrapper"] {{ border-radius: 10px; }}
+    .stTabs [data-baseweb="tab-list"] {{ gap: 4px; }}
+    .stTabs [data-baseweb="tab"] {{
+        height: 34px; padding: 0 14px; background: {CARD_BG}; border-radius: 8px 8px 0 0;
+        font-size: 0.82rem;
+    }}
+    hr {{ border-color: {BORDER} !important; margin: 10px 0 !important; }}
+    div[data-testid="stCaptionContainer"] {{ font-size: 0.72rem; }}
+    .stDataFrame {{ font-size: 0.78rem; }}
 </style>
 """, unsafe_allow_html=True)
 
 
 def section_title(icon: str, text: str):
     st.markdown(f'<div class="section-title"><span class="bar"></span>{icon} {text}</div>', unsafe_allow_html=True)
+
+
+def chart_layout(fig, height, **kwargs):
+    layout = dict(template="plotly_dark", paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
+                  height=height, margin=dict(t=28, l=8, r=8, b=8), font=dict(size=11))
+    layout.update(kwargs)
+    fig.update_layout(**layout)
+    return fig
 
 
 # ---------- Chargement des données ----------
@@ -273,327 +305,296 @@ if forecast is not None:
         "wind_speed_10m_max": "wind",
     })[["wilaya_id", "temp", "humidity", "wind"]]
     RISK_DATE = forecast["date"].min()
-    WEATHER_SOURCE = "prévision Open-Meteo du jour"
+    WEATHER_SOURCE = "prévision du jour"
 else:
     current_weather = None
     RISK_DATE = LAST_DATE
-    WEATHER_SOURCE = f"dernière météo du jeu de données ({LAST_DATE.strftime('%d/%m/%Y')}) — API de prévision injoignable"
+    WEATHER_SOURCE = f"météo du {LAST_DATE.strftime('%d/%m')} (API injoignable)"
 
 risk_df = compute_risk(ml, wilayas, RISK_DATE.month, current_weather)
+forest_risk = risk_df[risk_df["is_forest_zone"]]
 
-# ---------- En-tête ----------
+# ================= EN-TÊTE COMPACT =================
 st.markdown(f"""
-<div class="hero">
-    <h1>🔥 FireRisk DZ — Risque incendie de forêt par wilaya</h1>
-    <p>
-        Historique 2000–{LAST_DATE.year} + prévisions 7 jours &nbsp;·&nbsp;
-        Météo : Open-Meteo (ERA5 + prévisions) &nbsp;·&nbsp; Incendies : NASA FIRMS (MODIS + VIIRS) &nbsp;·&nbsp;
-        Risque évalué au {RISK_DATE.strftime('%d/%m/%Y')} ({WEATHER_SOURCE}) &nbsp;·&nbsp;
-        Historique feu jusqu'au {LAST_DATE.strftime('%d/%m/%Y')} ({DATA_SOURCE})
-    </p>
+<div class="topbar">
+    <h1>🔥 FireRisk DZ</h1>
+    <div class="meta">
+        Risque évalué le {RISK_DATE.strftime('%d/%m/%Y')} ({WEATHER_SOURCE}) &nbsp;·&nbsp;
+        Historique feu à jour au {LAST_DATE.strftime('%d/%m/%Y')} &nbsp;·&nbsp;
+        Open-Meteo (ERA5) + NASA FIRMS (MODIS/VIIRS), 2000 → aujourd'hui
+    </div>
 </div>
 """, unsafe_allow_html=True)
 
-# ---------- KPIs nationaux ----------
-forest_risk = risk_df[risk_df["is_forest_zone"]]
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("🌲 Wilayas forestières suivies", int(risk_df["is_forest_zone"].sum()))
-c2.metric("🔴 Risque très élevé", int((forest_risk["risk_level"] == "Très élevé").sum()))
-c3.metric("🟠 Risque élevé", int((forest_risk["risk_level"] == "Élevé").sum()))
-c4.metric("🔥 Total jours-feu détectés (2000-2026, zone forestière)", f'{int(forest_risk["total_fire_days"].sum()):,}')
+# ================= NAVIGATION PAR ONGLETS =================
+tab_overview, tab_forecast, tab_wilaya, tab_trends, tab_corr = st.tabs([
+    "🗺️ Vue d'ensemble", "🔮 Prévisions & IA", "📍 Détail par wilaya",
+    "📉 Tendances 2000-2026", "🔗 Corrélations & classement",
+])
 
-st.divider()
+# ---------- Onglet 1 : Vue d'ensemble ----------
+with tab_overview:
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    k1.metric("🌲 Wilayas suivies", int(risk_df["is_forest_zone"].sum()))
+    k2.metric("🔴 Risque très élevé", int((forest_risk["risk_level"] == "Très élevé").sum()))
+    k3.metric("🟠 Risque élevé", int((forest_risk["risk_level"] == "Élevé").sum()))
+    k4.metric("🟡 Risque modéré", int((forest_risk["risk_level"] == "Modéré").sum()))
+    k5.metric("🟢 Risque faible", int((forest_risk["risk_level"] == "Faible").sum()))
+    k6.metric("🔥 Jours-feu cumulés 2000-2026", f'{int(forest_risk["total_fire_days"].sum()):,}')
 
-# ---------- Carte de risque ----------
-section_title("🗺️", "Carte du risque incendie par wilaya")
-level_order = ["Faible", "Modéré", "Élevé", "Très élevé", "Hors périmètre"]
-fig_map = px.choropleth_mapbox(
-    risk_df, geojson=geojson, locations="wilaya_id", featureidkey="properties.wilaya_id",
-    color="risk_level", category_orders={"risk_level": level_order},
-    color_discrete_map=RISK_COLORS,
-    hover_name="wilaya_name",
-    hover_data={"wilaya_id": False, "risk_level": True, "freq_month": ":.1%"},
-    mapbox_style="carto-darkmatter", zoom=4.2, center={"lat": 32.5, "lon": 3.0}, opacity=0.75,
-)
-fig_map.update_layout(height=520, margin=dict(l=0, r=0, t=0, b=0), paper_bgcolor=CARD_BG,
-                       legend=dict(orientation="h", y=-0.02, font=dict(color="#e8ebee")))
-st.plotly_chart(fig_map, use_container_width=True)
+    col_map, col_rank = st.columns([7, 3])
+    with col_map:
+        section_title("🗺️", "Carte du risque par wilaya")
+        level_order = ["Faible", "Modéré", "Élevé", "Très élevé", "Hors périmètre"]
+        fig_map = px.choropleth_mapbox(
+            risk_df, geojson=geojson, locations="wilaya_id", featureidkey="properties.wilaya_id",
+            color="risk_level", category_orders={"risk_level": level_order},
+            color_discrete_map=RISK_COLORS,
+            hover_name="wilaya_name",
+            hover_data={"wilaya_id": False, "risk_level": True, "freq_month": ":.1%"},
+            mapbox_style="carto-darkmatter", zoom=4.4, center={"lat": 32.5, "lon": 3.0}, opacity=0.78,
+        )
+        fig_map.update_layout(height=560, margin=dict(l=0, r=0, t=0, b=0), paper_bgcolor=CARD_BG,
+                               legend=dict(orientation="h", y=-0.02, font=dict(color="#e8ebee", size=10)))
+        st.plotly_chart(fig_map, use_container_width=True)
+        st.caption(
+            f"Score = fréquence historique de feu du mois (55%) + anomalie météo du jour vs climatologie "
+            f"(45%, température↑/humidité↓/vent↑). Météo : {WEATHER_SOURCE}. Indicateur heuristique."
+        )
+
+    with col_rank:
+        section_title("🏆", "Classement du jour")
+        rank_tbl = forest_risk.sort_values("risk_score", ascending=False)[
+            ["wilaya_name", "risk_level", "risk_score"]
+        ].copy()
+        rank_tbl["risk_score"] = rank_tbl["risk_score"].round(0).astype(int)
+        rank_tbl.columns = ["Wilaya", "Niveau", "Score"]
+        st.dataframe(
+            rank_tbl, use_container_width=True, hide_index=True, height=560,
+            column_config={
+                "Score": st.column_config.ProgressColumn("Score", min_value=0, max_value=100, format="%d"),
+            },
+        )
+
+# ---------- Onglet 2 : Prévisions & IA ----------
+with tab_forecast:
+    if forecast is not None:
+        col_h, col_ai = st.columns(2)
+
+        clim = compute_climatology(ml)
+        fc = forecast.copy()
+        fc["month"] = fc["date"].dt.month
+        fc = fc.merge(clim, on=["wilaya_id", "month"], how="left")
+        fc = fc.merge(wilayas[["wilaya_id", "wilaya_name", "is_forest_zone"]], on="wilaya_id")
+        fc = fc[fc["is_forest_zone"]].copy()
+
+        temp_z = (fc["temperature_2m_max"] - fc["temp_mean"]) / fc["temp_std"]
+        hum_z = -(fc["relative_humidity_2m_mean"] - fc["hum_mean"]) / fc["hum_std"]
+        wind_z = (fc["wind_speed_10m_max"] - fc["wind_mean"]) / fc["wind_std"]
+        fc["weather_anomaly"] = np.clip((temp_z + hum_z + wind_z) / 3, -2, 2)
+        fc["freq_pct"] = fc.groupby("date")["freq_fire"].rank(pct=True)
+        fc["anomaly_pct"] = fc.groupby("date")["weather_anomaly"].rank(pct=True)
+        fc["risk_score"] = (0.55 * fc["freq_pct"] + 0.45 * fc["anomaly_pct"]) * 100
+
+        outlook = fc.pivot_table(index="wilaya_name", columns="date", values="risk_score")
+        outlook = outlook.loc[outlook.mean(axis=1).sort_values(ascending=False).index]
+        day_labels = [f"{JOURS_FR[d.weekday()]} {d.strftime('%d/%m')}" for d in outlook.columns]
+
+        with col_h:
+            section_title("🔮", "Score heuristique à 7 jours")
+            fig_outlook = go.Figure(go.Heatmap(
+                z=outlook.values, x=day_labels, y=outlook.index,
+                colorscale=[[0, "#2e7d32"], [0.25, "#4caf50"], [0.5, "#ffca28"], [0.75, "#ff9800"], [1, "#e53935"]],
+                zmin=0, zmax=100, colorbar=dict(title="Score", thickness=12),
+                hovertemplate="%{y} — %{x} : score %{z:.0f}/100<extra></extra>",
+            ))
+            chart_layout(fig_outlook, 720, yaxis=dict(autorange="reversed", tickfont=dict(size=10)))
+            st.plotly_chart(fig_outlook, use_container_width=True)
+            top3 = outlook.mean(axis=1).head(3)
+            st.caption(f"À surveiller cette semaine : {', '.join(top3.index)}.")
+
+        with col_ai:
+            if ml_model is not None:
+                section_title("🤖", "Probabilité IA à 7 jours")
+                preds = predict_fire_proba(ml_model, forecast, wilayas)
+                proba_matrix = preds.pivot_table(index="wilaya_name", columns="date", values="fire_proba") * 100
+                proba_matrix = proba_matrix.loc[proba_matrix.mean(axis=1).sort_values(ascending=False).index]
+                day_labels_ml = [f"{JOURS_FR[d.weekday()]} {d.strftime('%d/%m')}" for d in proba_matrix.columns]
+
+                fig_ml = go.Figure(go.Heatmap(
+                    z=proba_matrix.values, x=day_labels_ml, y=proba_matrix.index,
+                    colorscale="YlOrRd", zmin=0, zmax=60,
+                    colorbar=dict(title="P(feu) %", thickness=12),
+                    text=np.round(proba_matrix.values).astype(int), texttemplate="%{text}",
+                    textfont=dict(size=8),
+                    hovertemplate="%{y} — %{x} : %{z:.0f}%% de probabilité<extra></extra>",
+                ))
+                chart_layout(fig_ml, 720, yaxis=dict(autorange="reversed", tickfont=dict(size=10)))
+                st.plotly_chart(fig_ml, use_container_width=True)
+                m = ml_meta["metrics"]
+                top3_ml = proba_matrix.mean(axis=1).head(3)
+                st.caption(
+                    f"Gradient boosting, entraîné 2015-2023, testé 2024-2026 (ROC-AUC {m['roc_auc_test']:.2f}, "
+                    f"taux de base {m['base_rate_test']*100:.0f}%). À risque : {', '.join(top3_ml.index)}."
+                )
+            else:
+                st.info("Modèle prédictif non trouvé (model_fire_risk_v1.joblib).")
+    else:
+        st.info("⚠️ API de prévision Open-Meteo injoignable — réessayez au prochain rechargement.")
+
+# ---------- Onglet 3 : Détail par wilaya ----------
+with tab_wilaya:
+    forest_names = sorted(risk_df.loc[risk_df["is_forest_zone"], "wilaya_name"])
+    default_idx = forest_names.index("Tizi Ouzou") if "Tizi Ouzou" in forest_names else 0
+    sel_col, *metric_cols = st.columns([2, 1, 1, 1, 1, 1])
+    with sel_col:
+        selected_name = st.selectbox("Wilaya (zone forestière)", forest_names, index=default_idx, label_visibility="collapsed")
+
+    sel = risk_df[risk_df["wilaya_name"] == selected_name].iloc[0]
+    sel_ml = ml[ml["wilaya_id"] == sel["wilaya_id"]].copy()
+
+    icon = RISK_ICONS[sel["risk_level"]]
+    meteo_suffix = "prévu" if forecast is not None else "connu"
+    metric_cols[0].metric(f"🌡️ Temp. max {meteo_suffix}", f'{sel["latest_temp"]:.1f} °C')
+    metric_cols[1].metric(f"💧 Humidité {meteo_suffix}e", f'{sel["latest_humidity"]:.0f} %')
+    metric_cols[2].metric(f"💨 Vent {meteo_suffix}", f'{sel["latest_wind"]:.0f} km/h')
+    metric_cols[3].metric("🔥 Jours-feu (2000-2026)", int(sel["total_fire_days"]))
+    metric_cols[4].metric(f"{icon} Risque", sel["risk_level"])
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        section_title("📅", "Saisonnalité des feux")
+        monthly = sel_ml.groupby("month")["fire_detected"].sum().reindex(range(1, 13), fill_value=0)
+        fig_month = go.Figure(go.Bar(
+            x=[MOIS_FR[m] for m in monthly.index], y=monthly.values,
+            marker=dict(color=monthly.values, colorscale="OrRd"),
+        ))
+        chart_layout(fig_month, 320, yaxis=dict(title="Jours avec feu"))
+        st.plotly_chart(fig_month, use_container_width=True)
+
+    with c2:
+        section_title("📈", "Température vs jours de feu")
+        monthly_temp = sel_ml.groupby("month")["temperature_2m_max"].mean().reindex(range(1, 13))
+        fig_tf = go.Figure()
+        fig_tf.add_trace(go.Bar(x=[MOIS_FR[m] for m in monthly.index], y=monthly.values,
+                                 name="Jours-feu", marker=dict(color=ACCENT), opacity=0.7))
+        fig_tf.add_trace(go.Scatter(x=[MOIS_FR[m] for m in monthly_temp.index], y=monthly_temp.values,
+                                     name="Temp. max (°C)", yaxis="y2", line=dict(color="#ff5c5c", width=3)))
+        chart_layout(fig_tf, 320, yaxis=dict(title="Jours-feu"),
+                     yaxis2=dict(title="Temp. (°C)", overlaying="y", side="right"),
+                     legend=dict(orientation="h", y=1.18, font=dict(size=10)))
+        st.plotly_chart(fig_tf, use_container_width=True)
+
+    with c3:
+        section_title("🕰️", "Évolution annuelle")
+        sel_covered = sel_ml[sel_ml["fire_data_coverage"]] if "fire_data_coverage" in sel_ml.columns else sel_ml
+        sel_annual = sel_covered.groupby("year")["fire_detected"].sum()
+        sel_annual = sel_annual[sel_annual.index >= 2001]
+        fig_sel_annual = go.Figure(go.Bar(
+            x=sel_annual.index, y=sel_annual.values,
+            marker=dict(color=sel_annual.values, colorscale="OrRd"),
+        ))
+        fig_sel_annual.add_vline(x=2014.5, line=dict(color="#4fc3f7", width=1, dash="dot"))
+        chart_layout(fig_sel_annual, 320, yaxis=dict(title="Jours-feu"), xaxis=dict(dtick=4))
+        st.plotly_chart(fig_sel_annual, use_container_width=True)
+    st.caption("Trait bleu : bascule capteur MODIS → VIIRS (2015), ~5× plus sensible — comptages non comparables avant/après.")
+
+# ---------- Onglet 4 : Tendances nationales ----------
+with tab_trends:
+    forest_ids = risk_df.loc[risk_df["is_forest_zone"], "wilaya_id"]
+    forest_hist = ml[ml["wilaya_id"].isin(forest_ids)].copy()
+    if "fire_data_coverage" in forest_hist.columns:
+        forest_hist = forest_hist[forest_hist["fire_data_coverage"]]
+    forest_hist = forest_hist[forest_hist["year"] >= 2001]
+    current_year = LAST_DATE.year
+
+    annual_fire = forest_hist.groupby("year")["fire_detected"].sum()
+    summer = forest_hist[forest_hist["month"].isin([6, 7, 8, 9])]
+    annual_summer_temp = summer.groupby("year")["temperature_2m_max"].mean()
+
+    fig_trend = go.Figure()
+    bar_colors = ["#8a5a3b" if y < 2015 else ACCENT for y in annual_fire.index]
+    fig_trend.add_trace(go.Bar(x=annual_fire.index, y=annual_fire.values, name="Jours-feu (cumul wilayas)",
+                                marker=dict(color=bar_colors), opacity=0.85))
+    fig_trend.add_trace(go.Scatter(x=annual_summer_temp.index, y=annual_summer_temp.values,
+                                    name="Temp. max moy. été (°C)", yaxis="y2",
+                                    line=dict(color="#ff5c5c", width=3)))
+    z = np.polyfit(annual_summer_temp.index, annual_summer_temp.values, 1)
+    fig_trend.add_trace(go.Scatter(x=annual_summer_temp.index, y=np.polyval(z, annual_summer_temp.index),
+                                    name=f"Tendance ({z[0]*10:+.2f} °C/décennie)", yaxis="y2",
+                                    line=dict(color="#ff5c5c", width=1.5, dash="dash")))
+    fig_trend.add_vline(x=2014.5, line=dict(color="#4fc3f7", width=1.5, dash="dot"))
+    fig_trend.add_annotation(x=2014.5, y=1.1, yref="paper", showarrow=False,
+                              text="MODIS → VIIRS (×5 plus sensible)", font=dict(size=10, color="#4fc3f7"))
+    for yr, label, ay in [(2021, "Kabylie", -60), (2023, "Vague nationale", -25)]:
+        if yr in annual_fire.index:
+            fig_trend.add_annotation(x=yr, y=annual_fire[yr], text=f"{yr} — {label}",
+                                      showarrow=True, arrowhead=2, ax=40, ay=ay,
+                                      font=dict(size=9, color="#ffb347"), arrowcolor="#ffb347")
+    chart_layout(fig_trend, 380,
+                 yaxis=dict(title="Jours-feu/an"),
+                 yaxis2=dict(title="Temp. été (°C)", overlaying="y", side="right", showgrid=False),
+                 legend=dict(orientation="h", y=1.15, font=dict(size=10)), xaxis=dict(dtick=2))
+
+    col_trend, col_heat = st.columns([1, 1])
+    with col_trend:
+        section_title("📉", "Jours-feu vs température estivale")
+        st.plotly_chart(fig_trend, use_container_width=True)
+        st.caption(f"⚠️ Comptages avant/après 2015 non comparables (changement de capteur). "
+                   f"Tendance température homogène (ERA5) : {z[0]*10:+.2f} °C/décennie.")
+
+    with col_heat:
+        section_title("🗓️", "Heatmap saisonnière (année × mois)")
+        heat = forest_hist.pivot_table(index="year", columns="month", values="fire_detected", aggfunc="sum").fillna(0)
+        heat = heat.reindex(columns=range(1, 13), fill_value=0)
+        fig_heat = go.Figure(go.Heatmap(
+            z=heat.values, x=[MOIS_FR[m] for m in heat.columns], y=heat.index,
+            colorscale="OrRd", colorbar=dict(title="Jours-feu", thickness=12),
+            hovertemplate="%{y} — %{x} : %{z} jours-feu<extra></extra>",
+        ))
+        chart_layout(fig_heat, 380, yaxis=dict(dtick=3, autorange="reversed"))
+        st.plotly_chart(fig_heat, use_container_width=True)
+        st.caption("Saison des feux (juin-octobre, pic juillet-août) et étés 2021/2023 nettement visibles.")
+
+# ---------- Onglet 5 : Corrélations & classement ----------
+with tab_corr:
+    col_corr, col_table = st.columns([1, 2])
+
+    with col_corr:
+        section_title("🔗", "Corrélations météo ↔ incendies")
+        corr_vars = {
+            "temperature_2m_max": "🌡️ Température max",
+            "relative_humidity_2m_mean": "💧 Humidité relative",
+            "wind_speed_10m_max": "💨 Vent max",
+            "precipitation_sum": "🌧️ Précipitations",
+            "et0_fao_evapotranspiration": "🌾 Évapotranspiration",
+        }
+        forest_ml = ml[ml["wilaya_id"].isin(risk_df.loc[risk_df["is_forest_zone"], "wilaya_id"])]
+        corrs = {label: forest_ml[col].corr(forest_ml["fire_detected"]) for col, label in corr_vars.items()}
+        corr_series = pd.Series(corrs).sort_values()
+        fig_corr = go.Figure(go.Bar(
+            x=corr_series.values, y=corr_series.index, orientation="h",
+            marker=dict(color=["#e53935" if v > 0 else "#4fc3f7" for v in corr_series.values]),
+            text=[f"{v:+.3f}" for v in corr_series.values], textposition="outside",
+        ))
+        chart_layout(fig_corr, 460, margin=dict(t=20, l=8, r=70, b=8),
+                     xaxis=dict(title="Corrélation avec fire_detected", range=[-0.32, 0.42]))
+        st.plotly_chart(fig_corr, use_container_width=True)
+        st.caption("Pearson, 36 wilayas forestières, 2000-2026 (~348k jours×wilaya). Rouge = corrélation positive.")
+
+    with col_table:
+        section_title("🏆", "Classement complet des wilayas")
+        table = forest_risk.sort_values("risk_score", ascending=False)[
+            ["wilaya_name", "risk_level", "risk_score", "freq_month", "total_fire_days", "latest_temp", "latest_humidity", "latest_wind"]
+        ].copy()
+        table["risk_score"] = table["risk_score"].round(1)
+        table["freq_month"] = (table["freq_month"] * 100).round(1)
+        table.columns = ["Wilaya", "Niveau", "Score", "Fréq. mois (%)", "Jours-feu",
+                          "Temp. (°C)", "Humidité (%)", "Vent (km/h)"]
+        st.dataframe(table, use_container_width=True, hide_index=True, height=460)
+
 st.caption(
-    f"Score de risque = fréquence historique de feu pour le mois en cours (55%) + anomalie de la météo "
-    f"du jour vs climatologie du mois (45%, température↑/humidité↓/vent↑). Météo du jour : {WEATHER_SOURCE}. "
-    "Indicateur heuristique — un modèle prédictif entraîné (phase IA) viendra en complément."
-)
-
-st.divider()
-
-# ---------- Perspectives 7 jours ----------
-if forecast is not None:
-    section_title("🔮", "Perspectives à 7 jours (prévisions Open-Meteo)")
-    clim = compute_climatology(ml)
-    fc = forecast.copy()
-    fc["month"] = fc["date"].dt.month
-    fc = fc.merge(clim, on=["wilaya_id", "month"], how="left")
-    fc = fc.merge(wilayas[["wilaya_id", "wilaya_name", "is_forest_zone"]], on="wilaya_id")
-    fc = fc[fc["is_forest_zone"]].copy()
-
-    temp_z = (fc["temperature_2m_max"] - fc["temp_mean"]) / fc["temp_std"]
-    hum_z = -(fc["relative_humidity_2m_mean"] - fc["hum_mean"]) / fc["hum_std"]
-    wind_z = (fc["wind_speed_10m_max"] - fc["wind_mean"]) / fc["wind_std"]
-    fc["weather_anomaly"] = np.clip((temp_z + hum_z + wind_z) / 3, -2, 2)
-
-    # Score par jour : percentiles calculés jour par jour, comme pour la carte
-    fc["freq_pct"] = fc.groupby("date")["freq_fire"].rank(pct=True)
-    fc["anomaly_pct"] = fc.groupby("date")["weather_anomaly"].rank(pct=True)
-    fc["risk_score"] = (0.55 * fc["freq_pct"] + 0.45 * fc["anomaly_pct"]) * 100
-
-    outlook = fc.pivot_table(index="wilaya_name", columns="date", values="risk_score")
-    outlook = outlook.loc[outlook.mean(axis=1).sort_values(ascending=False).index]
-    day_labels = [f"{JOURS_FR[d.weekday()]} {d.strftime('%d/%m')}" for d in outlook.columns]
-
-    fig_outlook = go.Figure(go.Heatmap(
-        z=outlook.values, x=day_labels, y=outlook.index,
-        colorscale=[[0, "#2e7d32"], [0.25, "#4caf50"], [0.5, "#ffca28"], [0.75, "#ff9800"], [1, "#e53935"]],
-        zmin=0, zmax=100, colorbar=dict(title="Score"),
-        hovertemplate="%{y} — %{x} : score %{z:.0f}/100<extra></extra>",
-    ))
-    fig_outlook.update_layout(
-        template="plotly_dark", paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
-        height=760, margin=dict(t=20, l=10, r=10, b=10),
-        yaxis=dict(autorange="reversed", tickfont=dict(size=11)),
-    )
-    st.plotly_chart(fig_outlook, use_container_width=True)
-
-    top3 = outlook.mean(axis=1).head(3)
-    st.caption(
-        f"Score de risque quotidien (0-100) par wilaya forestière, calculé sur les prévisions météo à 7 jours "
-        f"croisées avec la climatologie 2000-2026. Wilayas classées par risque moyen décroissant — "
-        f"à surveiller cette semaine : {', '.join(top3.index)}. Prévisions rafraîchies toutes les heures."
-    )
-else:
-    st.info("⚠️ API de prévision Open-Meteo injoignable — les perspectives à 7 jours seront affichées au prochain rechargement avec connexion.")
-
-st.divider()
-
-# ---------- Prédiction IA ----------
-if forecast is not None and ml_model is not None:
-    section_title("🤖", "Prédiction IA — probabilité d'incendie à 7 jours")
-    preds = predict_fire_proba(ml_model, forecast, wilayas)
-    proba_matrix = preds.pivot_table(index="wilaya_name", columns="date", values="fire_proba") * 100
-    proba_matrix = proba_matrix.loc[proba_matrix.mean(axis=1).sort_values(ascending=False).index]
-    day_labels_ml = [f"{JOURS_FR[d.weekday()]} {d.strftime('%d/%m')}" for d in proba_matrix.columns]
-
-    fig_ml = go.Figure(go.Heatmap(
-        z=proba_matrix.values, x=day_labels_ml, y=proba_matrix.index,
-        colorscale="YlOrRd", zmin=0, zmax=60,
-        colorbar=dict(title="P(feu) %"),
-        text=np.round(proba_matrix.values).astype(int), texttemplate="%{text}",
-        textfont=dict(size=9),
-        hovertemplate="%{y} — %{x} : %{z:.0f}%% de probabilité d'au moins une détection<extra></extra>",
-    ))
-    fig_ml.update_layout(
-        template="plotly_dark", paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
-        height=760, margin=dict(t=20, l=10, r=10, b=10),
-        yaxis=dict(autorange="reversed", tickfont=dict(size=11)),
-    )
-    st.plotly_chart(fig_ml, use_container_width=True)
-
-    m = ml_meta["metrics"]
-    top3_ml = proba_matrix.mean(axis=1).head(3)
-    st.caption(
-        f"Probabilité qu'au moins un feu de végétation soit détecté par satellite dans la wilaya ce jour-là, "
-        f"prédite par un modèle de gradient boosting entraîné sur 2015-2023 (ère VIIRS) et évalué sur "
-        f"2024-2026 jamais vues : ROC-AUC {m['roc_auc_test']:.2f}, PR-AUC {m['pr_auc_test']:.2f} "
-        f"(taux de base {m['base_rate_test']*100:.0f}%). Wilayas les plus à risque selon le modèle : "
-        f"{', '.join(top3_ml.index)}. Contrairement au score heuristique ci-dessus (pondérations fixes), "
-        f"ces probabilités sont apprises sur les données."
-    )
-elif forecast is not None:
-    st.info("Modèle prédictif non trouvé (model_fire_risk_v1.joblib) — section IA masquée.")
-
-st.divider()
-
-# ---------- Sélection d'une wilaya ----------
-section_title("📍", "Détail par wilaya")
-forest_names = sorted(risk_df.loc[risk_df["is_forest_zone"], "wilaya_name"])
-default_idx = forest_names.index("Tizi Ouzou") if "Tizi Ouzou" in forest_names else 0
-selected_name = st.selectbox("Choisir une wilaya (zone forestière)", forest_names, index=default_idx)
-
-sel = risk_df[risk_df["wilaya_name"] == selected_name].iloc[0]
-sel_ml = ml[ml["wilaya_id"] == sel["wilaya_id"]].copy()
-
-icon = RISK_ICONS[sel["risk_level"]]
-meteo_suffix = "aujourd'hui (prévision)" if forecast is not None else "connue"
-d1, d2, d3, d4, d5 = st.columns(5)
-d1.metric(f"🌡️ Temp. max {meteo_suffix}", f'{sel["latest_temp"]:.1f} °C')
-d2.metric(f"💧 Humidité {meteo_suffix}", f'{sel["latest_humidity"]:.0f} %')
-d3.metric(f"💨 Vent max {meteo_suffix}", f'{sel["latest_wind"]:.0f} km/h')
-d4.metric("🔥 Jours avec feu (2000-2026)", int(sel["total_fire_days"]))
-d5.metric(f"{icon} Niveau de risque actuel", sel["risk_level"])
-
-st.divider()
-
-col_a, col_b = st.columns(2)
-
-with col_a:
-    section_title("📅", f"Saisonnalité des feux — {selected_name}")
-    monthly = sel_ml.groupby("month")["fire_detected"].sum().reindex(range(1, 13), fill_value=0)
-    fig_month = go.Figure(go.Bar(
-        x=[MOIS_FR[m] for m in monthly.index], y=monthly.values,
-        marker=dict(color=monthly.values, colorscale="OrRd"),
-    ))
-    fig_month.update_layout(template="plotly_dark", paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
-                             height=340, margin=dict(t=20, l=10, r=10, b=10),
-                             yaxis=dict(title="Jours avec feu (cumul 2000-2026)"))
-    st.plotly_chart(fig_month, use_container_width=True)
-
-with col_b:
-    section_title("📈", "Température moyenne vs jours de feu, par mois")
-    monthly_temp = sel_ml.groupby("month")["temperature_2m_max"].mean().reindex(range(1, 13))
-    fig_tf = go.Figure()
-    fig_tf.add_trace(go.Bar(x=[MOIS_FR[m] for m in monthly.index], y=monthly.values,
-                             name="Jours avec feu", marker=dict(color=ACCENT), opacity=0.7))
-    fig_tf.add_trace(go.Scatter(x=[MOIS_FR[m] for m in monthly_temp.index], y=monthly_temp.values,
-                                 name="Temp. max moy. (°C)", yaxis="y2", line=dict(color="#ff5c5c", width=3)))
-    fig_tf.update_layout(template="plotly_dark", paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
-                          height=340, margin=dict(t=20, l=10, r=10, b=10),
-                          yaxis=dict(title="Jours avec feu"), yaxis2=dict(title="Temp. (°C)", overlaying="y", side="right"),
-                          legend=dict(orientation="h", y=1.15))
-    st.plotly_chart(fig_tf, use_container_width=True)
-
-# Évolution annuelle pour la wilaya sélectionnée
-section_title("🕰️", f"Évolution annuelle des feux — {selected_name}")
-sel_covered = sel_ml[sel_ml["fire_data_coverage"]] if "fire_data_coverage" in sel_ml.columns else sel_ml
-sel_annual = sel_covered.groupby("year")["fire_detected"].sum()
-sel_annual = sel_annual[sel_annual.index >= 2001]  # 2000 partiel (couverture satellite depuis nov.)
-fig_sel_annual = go.Figure(go.Bar(
-    x=sel_annual.index, y=sel_annual.values,
-    marker=dict(color=sel_annual.values, colorscale="OrRd"),
-))
-fig_sel_annual.add_vline(x=2014.5, line=dict(color="#4fc3f7", width=1, dash="dot"),
-                          annotation_text="MODIS → VIIRS", annotation_position="top",
-                          annotation=dict(font=dict(size=10, color="#4fc3f7")))
-fig_sel_annual.update_layout(template="plotly_dark", paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
-                              height=300, margin=dict(t=30, l=10, r=10, b=10),
-                              yaxis=dict(title="Jours avec feu"), xaxis=dict(dtick=2))
-st.plotly_chart(fig_sel_annual, use_container_width=True)
-
-st.divider()
-
-# ---------- Tendances nationales 2001-2026 ----------
-section_title("📉", "Tendances nationales (zone forestière, 2001-2026)")
-forest_ids = risk_df.loc[risk_df["is_forest_zone"], "wilaya_id"]
-forest_hist = ml[ml["wilaya_id"].isin(forest_ids)].copy()
-if "fire_data_coverage" in forest_hist.columns:
-    forest_hist = forest_hist[forest_hist["fire_data_coverage"]]
-forest_hist = forest_hist[forest_hist["year"] >= 2001]
-current_year = LAST_DATE.year
-
-annual_fire = forest_hist.groupby("year")["fire_detected"].sum()
-summer = forest_hist[forest_hist["month"].isin([6, 7, 8, 9])]
-annual_summer_temp = summer.groupby("year")["temperature_2m_max"].mean()
-
-fig_trend = go.Figure()
-bar_colors = ["#8a5a3b" if y < 2015 else ACCENT for y in annual_fire.index]
-fig_trend.add_trace(go.Bar(x=annual_fire.index, y=annual_fire.values, name="Jours-feu (cumul wilayas)",
-                            marker=dict(color=bar_colors), opacity=0.85))
-fig_trend.add_trace(go.Scatter(x=annual_summer_temp.index, y=annual_summer_temp.values,
-                                name="Temp. max moy. été juin-sept (°C)", yaxis="y2",
-                                line=dict(color="#ff5c5c", width=3)))
-z = np.polyfit(annual_summer_temp.index, annual_summer_temp.values, 1)
-fig_trend.add_trace(go.Scatter(x=annual_summer_temp.index, y=np.polyval(z, annual_summer_temp.index),
-                                name=f"Tendance temp. ({z[0]*10:+.2f} °C/décennie)", yaxis="y2",
-                                line=dict(color="#ff5c5c", width=1.5, dash="dash")))
-fig_trend.add_vline(x=2014.5, line=dict(color="#4fc3f7", width=1.5, dash="dot"))
-fig_trend.add_annotation(x=2014.5, y=1.06, yref="paper", showarrow=False,
-                          text="Changement de capteur MODIS → VIIRS (×5 plus sensible)",
-                          font=dict(size=11, color="#4fc3f7"))
-for yr, label, ay in [(2021, "Incendies meurtriers de Kabylie", -70), (2023, "Vague nationale juillet", -30)]:
-    if yr in annual_fire.index:
-        fig_trend.add_annotation(x=yr, y=annual_fire[yr], text=f"{yr} — {label}",
-                                  showarrow=True, arrowhead=2, ax=40, ay=ay,
-                                  font=dict(size=10, color="#ffb347"), arrowcolor="#ffb347")
-fig_trend.update_layout(
-    template="plotly_dark", paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
-    height=440, margin=dict(t=50, l=10, r=10, b=10),
-    yaxis=dict(title="Jours-feu par an (cumul 36 wilayas)"),
-    yaxis2=dict(title="Temp. max moy. été (°C)", overlaying="y", side="right", showgrid=False),
-    legend=dict(orientation="h", y=1.14),
-    xaxis=dict(dtick=2),
-)
-st.plotly_chart(fig_trend, use_container_width=True)
-st.caption(
-    f"⚠️ Les comptages avant/après 2015 ne sont pas directement comparables : MODIS (résolution 1 km, "
-    f"2001-2014, barres brunes) détecte beaucoup moins de petits feux que VIIRS (375 m, 2015+, barres orange). "
-    f"La tendance de température estivale, elle, est homogène sur toute la période (ERA5) : "
-    f"{z[0]*10:+.2f} °C/décennie sur la zone forestière. {current_year} est une année partielle "
-    f"(données jusqu'au {LAST_DATE.strftime('%d/%m')})."
-)
-
-# Heatmap année x mois
-section_title("🗓️", "Heatmap saisonnière : jours-feu par mois et par année")
-heat = forest_hist.pivot_table(index="year", columns="month", values="fire_detected", aggfunc="sum").fillna(0)
-heat = heat.reindex(columns=range(1, 13), fill_value=0)
-fig_heat = go.Figure(go.Heatmap(
-    z=heat.values, x=[MOIS_FR[m] for m in heat.columns], y=heat.index,
-    colorscale="OrRd", colorbar=dict(title="Jours-feu"),
-    hovertemplate="%{y} — %{x} : %{z} jours-feu<extra></extra>",
-))
-fig_heat.update_layout(template="plotly_dark", paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
-                        height=560, margin=dict(t=20, l=10, r=10, b=10),
-                        yaxis=dict(dtick=2, autorange="reversed"))
-st.plotly_chart(fig_heat, use_container_width=True)
-st.caption(
-    "Cumul des jours avec détection sur les 36 wilayas forestières. La saison des feux (juin-octobre, "
-    "pic juillet-août) ressort nettement, ainsi que les étés exceptionnels 2021 et 2023. "
-    "Même réserve que ci-dessus sur la comparaison avant/après 2015."
-)
-
-st.divider()
-
-# ---------- Corrélations ----------
-section_title("🔗", "Corrélations météo ↔ incendies (zone forestière, 2000-2026)")
-corr_vars = {
-    "temperature_2m_max": "🌡️ Température max",
-    "relative_humidity_2m_mean": "💧 Humidité relative",
-    "wind_speed_10m_max": "💨 Vent max",
-    "precipitation_sum": "🌧️ Précipitations",
-    "et0_fao_evapotranspiration": "🌾 Évapotranspiration",
-}
-forest_ml = ml[ml["wilaya_id"].isin(risk_df.loc[risk_df["is_forest_zone"], "wilaya_id"])]
-corrs = {label: forest_ml[col].corr(forest_ml["fire_detected"]) for col, label in corr_vars.items()}
-corr_series = pd.Series(corrs).sort_values()
-
-fig_corr = go.Figure(go.Bar(
-    x=corr_series.values, y=corr_series.index, orientation="h",
-    marker=dict(color=["#e53935" if v > 0 else "#4fc3f7" for v in corr_series.values]),
-    text=[f"{v:+.3f}" for v in corr_series.values], textposition="outside",
-))
-fig_corr.update_layout(template="plotly_dark", paper_bgcolor=CARD_BG, plot_bgcolor=CARD_BG,
-                        height=320, margin=dict(t=20, l=10, r=60, b=10),
-                        xaxis=dict(title="Coefficient de corrélation avec fire_detected", range=[-0.3, 0.3]))
-st.plotly_chart(fig_corr, use_container_width=True)
-st.caption(
-    "Corrélation de Pearson entre chaque variable météo et la variable binaire fire_detected, "
-    "calculée sur les 36 wilayas forestières, 2000-2026 (~348k jours x wilaya). "
-    "Rouge = plus la variable est élevée, plus les feux sont fréquents ; bleu = l'inverse."
-)
-
-st.divider()
-
-# ---------- Classement national ----------
-section_title("🏆", "Classement des wilayas par risque actuel")
-table = forest_risk.sort_values("risk_score", ascending=False)[
-    ["wilaya_name", "risk_level", "risk_score", "freq_month", "total_fire_days", "latest_temp", "latest_humidity", "latest_wind"]
-].copy()
-table["risk_score"] = table["risk_score"].round(1)
-table["freq_month"] = (table["freq_month"] * 100).round(1)
-table.columns = ["Wilaya", "Niveau", "Score (0-100)", "Fréq. feu ce mois (%, hist.)", "Jours-feu (2000-2026)",
-                  "Dernière temp. (°C)", "Dernière humidité (%)", "Dernier vent (km/h)"]
-st.dataframe(table, use_container_width=True, hide_index=True)
-
-st.divider()
-st.caption(
-    "FireRisk DZ — phase tableau de bord analytique. Score de risque basé sur l'historique et la météo la "
-    "plus récente disponible dans le jeu de données (pas de prévision temps réel à ce stade). "
-    "Prochaine étape : intégration de prévisions météo et modèle prédictif (Random Forest / XGBoost)."
+    "FireRisk DZ — phase tableau de bord + IA. Score heuristique et probabilité du modèle prédictif sont deux "
+    "indicateurs complémentaires, pas des prévisions officielles. Sources et méthodologie détaillées : "
+    "[dépôt de données](https://github.com/kenzakab16/firerisk-dz-data)."
 )
