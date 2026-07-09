@@ -420,6 +420,65 @@ def backtest_recent(ml: pd.DataFrame, wilayas: pd.DataFrame, clim: pd.DataFrame,
     return df, window_start, window_end
 
 
+# ---------- Fraîcheur du pipeline automatique ----------
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_pipeline_last_update():
+    """Date du dernier commit GitHub Actions ayant mis à jour les données
+    du jour (preuve que le pipeline quotidien tourne bien), interrogée
+    directement sur l'historique du dépôt de données. Retourne None si
+    l'API GitHub est injoignable (pas de secret requis, dépôt public)."""
+    import urllib.request
+    url = ("https://api.github.com/repos/kenzakab16/firerisk-dz-data/commits"
+           "?path=data/processed/ml_table_current_year.parquet&per_page=1")
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json",
+                                                     "User-Agent": "firerisk-dz-dashboard"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        return pd.Timestamp(data[0]["commit"]["committer"]["date"])
+    except Exception:
+        return None
+
+
+def format_freshness(ts):
+    """Retourne (libellé relatif, statut ok/warn/stale). Le job quotidien
+    tourne à 03:15 UTC : au-delà de 30h sans mise à jour, il a probablement
+    échoué deux fois de suite."""
+    if ts is None:
+        return "indisponible", "unknown"
+    now = pd.Timestamp.now(tz="UTC")
+    hours = (now - ts).total_seconds() / 3600
+    if hours < 1:
+        label = "il y a moins d'1 h"
+    elif hours < 24:
+        label = f"il y a {int(hours)} h"
+    else:
+        days, rem_h = int(hours // 24), int(hours % 24)
+        label = f"il y a {days} j {rem_h} h" if rem_h else f"il y a {days} j"
+    status = "ok" if hours <= 30 else ("warn" if hours <= 48 else "stale")
+    return label, status
+
+
+def render_pipeline_badge():
+    ts = fetch_pipeline_last_update()
+    label, status = format_freshness(ts)
+    badge_color = {"ok": FOREST_GREEN, "warn": "#f6c445", "stale": "#e0453c", "unknown": "#5a6b80"}[status]
+    badge_text = {
+        "ok": "Pipeline automatique actif", "warn": "Mise à jour en retard",
+        "stale": "⚠️ Pipeline probablement en panne", "unknown": "Statut du pipeline indisponible",
+    }[status]
+    tooltip = f"Dernière mise à jour automatique des données : {label}" if ts is not None else \
+        "Impossible de vérifier l'état du pipeline (API GitHub injoignable)"
+    st.markdown(f"""
+    <div title="{tooltip}" style="display:inline-flex; align-items:center; gap:6px; background:{CARD_BG};
+                border:1px solid {BORDER}; border-radius:20px; padding:5px 12px; margin-bottom:10px; font-size:0.72rem;">
+        <span style="width:8px; height:8px; border-radius:50%; background:{badge_color};
+                     box-shadow:0 0 6px {badge_color};"></span>
+        <span style="color:#c3cad2;">{badge_text} — mise à jour {label}</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+
 def render_public_view():
     """Vue grand public : langage courant, gros pictos, pas de jargon
     (pas de score/percentile/corrélation/AUC). Carte + météo du jour +
@@ -573,6 +632,7 @@ st.markdown(f"""
     <div class="meta">Risque incendie de forêt en Algérie, par wilaya · mis à jour au {RISK_DATE.strftime('%d/%m/%Y')}</div>
 </div>
 """, unsafe_allow_html=True)
+render_pipeline_badge()
 
 # ================= BASCULE VUE SIMPLE / VUE EXPERTE =================
 if "view_mode" not in st.session_state:
