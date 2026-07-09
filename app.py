@@ -313,6 +313,53 @@ else:
 
 risk_df = compute_risk(ml, wilayas, RISK_DATE.month, current_weather)
 forest_risk = risk_df[risk_df["is_forest_zone"]]
+clim = compute_climatology(ml)
+
+
+# ---------- Backtesting : score/proba rétro-calculés sur météo réelle ----------
+@st.cache_data
+def backtest_recent(ml: pd.DataFrame, wilayas: pd.DataFrame, clim: pd.DataFrame, days: int, _model):
+    """Rejoue le score heuristique et le modèle IA sur les `days` derniers
+    jours COMPLETS en utilisant la météo réellement observée (pas la
+    prévision telle qu'elle aurait été émise à l'époque — non conservée
+    pour l'instant, voir forecast_log.csv pour la collecte à partir
+    d'aujourd'hui). Les 2 derniers jours sont exclus : les détections
+    FIRMS les plus récentes peuvent être encore incomplètes (latence
+    satellite/traitement)."""
+    forest_ids = set(wilayas.loc[wilayas["is_forest_zone"], "wilaya_id"])
+    max_date = ml["date"].max()
+    window_end = max_date - pd.Timedelta(days=2)
+    window_start = window_end - pd.Timedelta(days=days - 1)
+
+    df = ml[(ml["wilaya_id"].isin(forest_ids)) & (ml["date"] >= window_start) & (ml["date"] <= window_end)].copy()
+    if "fire_data_coverage" in df.columns:
+        df = df[df["fire_data_coverage"]]
+    if df.empty:
+        return df, window_start, window_end
+
+    df = df.merge(clim, on=["wilaya_id", "month"], how="left")
+    temp_z = (df["temperature_2m_max"] - df["temp_mean"]) / df["temp_std"]
+    hum_z = -(df["relative_humidity_2m_mean"] - df["hum_mean"]) / df["hum_std"]
+    wind_z = (df["wind_speed_10m_max"] - df["wind_mean"]) / df["wind_std"]
+    df["weather_anomaly"] = np.clip((temp_z + hum_z + wind_z) / 3, -2, 2)
+    df["freq_pct"] = df.groupby("date")["freq_fire"].rank(pct=True)
+    df["anomaly_pct"] = df.groupby("date")["weather_anomaly"].rank(pct=True)
+    df["heuristic_score"] = (0.55 * df["freq_pct"] + 0.45 * df["anomaly_pct"]) * 100
+    df["heuristic_rank"] = df.groupby("date")["heuristic_score"].rank(ascending=False, method="min").astype(int)
+
+    if _model is not None:
+        X = df[MODEL_WEATHER_FEATURES + ["centroid_lat", "centroid_lon", "area_km2"]].copy()
+        month = df["date"].dt.month
+        X["month_sin"] = np.sin(2 * np.pi * month / 12)
+        X["month_cos"] = np.cos(2 * np.pi * month / 12)
+        X["wilaya_id"] = pd.Categorical(df["wilaya_id"], categories=sorted(forest_ids))
+        df["ai_proba"] = _model.predict_proba(X)[:, 1] * 100
+        df["ai_rank"] = df.groupby("date")["ai_proba"].rank(ascending=False, method="min").astype(int)
+    else:
+        df["ai_proba"] = np.nan
+        df["ai_rank"] = np.nan
+
+    return df, window_start, window_end
 
 # ================= EN-TÊTE COMPACT =================
 st.markdown(f"""
@@ -327,8 +374,8 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # ================= NAVIGATION PAR ONGLETS =================
-tab_overview, tab_forecast, tab_wilaya, tab_trends, tab_corr = st.tabs([
-    "🗺️ Vue d'ensemble", "🔮 Prévisions & IA", "📍 Détail par wilaya",
+tab_overview, tab_forecast, tab_backtest, tab_wilaya, tab_trends, tab_corr = st.tabs([
+    "🗺️ Vue d'ensemble", "🔮 Prévisions & IA", "🎯 Backtesting", "📍 Détail par wilaya",
     "📉 Tendances 2000-2026", "🔗 Corrélations & classement",
 ])
 
@@ -381,7 +428,6 @@ with tab_forecast:
     if forecast is not None:
         col_h, col_ai = st.columns(2)
 
-        clim = compute_climatology(ml)
         fc = forecast.copy()
         fc["month"] = fc["date"].dt.month
         fc = fc.merge(clim, on=["wilaya_id", "month"], how="left")
@@ -442,7 +488,85 @@ with tab_forecast:
     else:
         st.info("⚠️ API de prévision Open-Meteo injoignable — réessayez au prochain rechargement.")
 
-# ---------- Onglet 3 : Détail par wilaya ----------
+# ---------- Onglet 3 : Backtesting ----------
+with tab_backtest:
+    days_window = st.radio("Fenêtre", [7, 14, 30], index=1, horizontal=True, label_visibility="collapsed",
+                            format_func=lambda d: f"{d} derniers jours")
+    bt, w_start, w_end = backtest_recent(ml, wilayas, clim, days_window, ml_model)
+
+    if bt.empty:
+        st.info("Pas assez de données récentes pour la rétro-simulation.")
+    else:
+        fire_rows = bt[bt["fire_detected"] == 1]
+        n_fire_days = len(fire_rows)
+        TOP_K = 8
+
+        hit_heuristic = (fire_rows["heuristic_rank"] <= TOP_K).mean() * 100 if n_fire_days else np.nan
+        hit_ai = (fire_rows["ai_rank"] <= TOP_K).mean() * 100 if n_fire_days and ml_model is not None else np.nan
+
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("📅 Fenêtre analysée", f"{w_start.strftime('%d/%m')} → {w_end.strftime('%d/%m')}")
+        k2.metric("🔥 Journées-wilaya en feu", n_fire_days)
+        k3.metric(f"🎯 Détection top {TOP_K} (heuristique)", f"{hit_heuristic:.0f} %" if n_fire_days else "—")
+        k4.metric(f"🤖 Détection top {TOP_K} (IA)", f"{hit_ai:.0f} %" if n_fire_days and ml_model is not None else "—")
+
+        col_calib, col_hits = st.columns([1, 1])
+
+        with col_calib:
+            section_title("📐", "Calibration IA sur la fenêtre récente")
+            if ml_model is not None and n_fire_days >= 3:
+                calib = bt.copy()
+                calib["bin"] = pd.qcut(calib["ai_proba"], q=min(6, calib["ai_proba"].nunique()),
+                                        duplicates="drop")
+                calib_g = calib.groupby("bin", observed=True).agg(
+                    pred=("ai_proba", "mean"), obs=("fire_detected", "mean"), n=("fire_detected", "size"),
+                ).reset_index()
+                fig_calib = go.Figure()
+                fig_calib.add_trace(go.Scatter(x=calib_g["pred"], y=calib_g["obs"] * 100, mode="lines+markers",
+                                                name="Observé", line=dict(color=ACCENT, width=2),
+                                                marker=dict(size=8)))
+                fig_calib.add_trace(go.Scatter(x=[0, calib_g["pred"].max()], y=[0, calib_g["pred"].max()],
+                                                mode="lines", name="Calibration parfaite",
+                                                line=dict(color="#4fc3f7", width=1, dash="dot")))
+                chart_layout(fig_calib, 340,
+                             xaxis=dict(title="Probabilité prédite (%)"), yaxis=dict(title="Taux de feu observé (%)"),
+                             legend=dict(orientation="h", y=1.15, font=dict(size=10)))
+                st.plotly_chart(fig_calib, use_container_width=True)
+                st.caption("Proche de la diagonale = modèle bien calibré sur la période récente.")
+            else:
+                st.info("Trop peu de journées-feu récentes pour une courbe de calibration fiable.")
+
+        with col_hits:
+            section_title("✅", "Feux détectés vs rang prédit")
+            if n_fire_days:
+                hits_tbl = fire_rows.sort_values("date", ascending=False)[
+                    ["date", "wilaya_name", "heuristic_rank", "ai_rank", "nb_detections"]
+                ].copy()
+                hits_tbl["date"] = hits_tbl["date"].dt.strftime("%d/%m")
+                hits_tbl.columns = ["Date", "Wilaya", "Rang heuristique", "Rang IA", "Détections"]
+                st.dataframe(
+                    hits_tbl, use_container_width=True, hide_index=True, height=340,
+                    column_config={
+                        "Rang heuristique": st.column_config.NumberColumn(help=f"1 = risque le plus élevé ce jour-là (sur 36). ≤{TOP_K} = repéré."),
+                        "Rang IA": st.column_config.NumberColumn(help=f"1 = probabilité la plus élevée ce jour-là (sur 36). ≤{TOP_K} = repéré."),
+                    },
+                )
+                st.caption(f"Rang ≤ {TOP_K} = la wilaya était dans la liste de surveillance ce jour-là.")
+            else:
+                st.info("Aucun feu de végétation détecté sur cette fenêtre.")
+
+        st.warning(
+            "⚠️ **Méthodologie** : cette rétro-simulation applique le score heuristique et le modèle IA à la "
+            "météo **réellement observée** des derniers jours, pas à la prévision telle qu'elle aurait été "
+            "émise à l'époque (non archivée avant aujourd'hui — voir ci-dessous). C'est un test honnête de la "
+            "capacité de *discrimination* du modèle (sait-il reconnaître les journées à risque une fois la "
+            "météo connue ?), mais pas encore un test de la qualité des *prévisions* à 7 jours elles-mêmes. "
+            "Les prévisions quotidiennes sont désormais archivées automatiquement (voir `forecast_log.csv` dans "
+            "[firerisk-dz-data](https://github.com/kenzakab16/firerisk-dz-data)) : un vrai backtesting "
+            "prévision-vs-réel sera possible dans quelques semaines."
+        )
+
+# ---------- Onglet 4 : Détail par wilaya ----------
 with tab_wilaya:
     forest_names = sorted(risk_df.loc[risk_df["is_forest_zone"], "wilaya_name"])
     default_idx = forest_names.index("Tizi Ouzou") if "Tizi Ouzou" in forest_names else 0
@@ -499,7 +623,7 @@ with tab_wilaya:
         st.plotly_chart(fig_sel_annual, use_container_width=True)
     st.caption("Trait bleu : bascule capteur MODIS → VIIRS (2015), ~5× plus sensible — comptages non comparables avant/après.")
 
-# ---------- Onglet 4 : Tendances nationales ----------
+# ---------- Onglet 5 : Tendances nationales ----------
 with tab_trends:
     forest_ids = risk_df.loc[risk_df["is_forest_zone"], "wilaya_id"]
     forest_hist = ml[ml["wilaya_id"].isin(forest_ids)].copy()
@@ -556,7 +680,7 @@ with tab_trends:
         st.plotly_chart(fig_heat, use_container_width=True)
         st.caption("Saison des feux (juin-octobre, pic juillet-août) et étés 2021/2023 nettement visibles.")
 
-# ---------- Onglet 5 : Corrélations & classement ----------
+# ---------- Onglet 6 : Corrélations & classement ----------
 with tab_corr:
     col_corr, col_table = st.columns([1, 2])
 
