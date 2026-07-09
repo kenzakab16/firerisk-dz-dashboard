@@ -17,16 +17,22 @@ import streamlit as st
 st.set_page_config(page_title="FireRisk DZ", page_icon="🔥", layout="wide", initial_sidebar_state="collapsed")
 
 # ---------- Palette & styles ----------
-ACCENT = "#ff7a45"
-CARD_BG = "#171c22"
-BG = "#0f1216"
-BORDER = "rgba(255,255,255,0.07)"
+# Charte graphique institutionnelle : bleus profonds pour l'interface et les
+# cartes, vert forêt pour tout ce qui touche à la végétation/au couvert
+# forestier, dégradé jaune → orange → rouge réservé aux niveaux d'alerte
+# et aux données de feu (code couleur intuitif chaleur/danger).
+ACCENT = "#2e86ab"           # bleu institutionnel — chrome de l'interface (bordures, titres, boutons)
+FIRE_ACCENT = "#ff7a45"      # orange feu — réservé aux données d'activité incendie (barres, courbes)
+FOREST_GREEN = "#3fa34d"     # vert forêt — éléments liés au couvert forestier / risque faible
+CARD_BG = "#101b2d"          # bleu marine profond — fond des cartes
+BG = "#0a1420"               # bleu nuit — fond de page
+BORDER = "rgba(140,180,220,0.14)"
 RISK_COLORS = {
-    "Faible": "#4caf50",
-    "Modéré": "#ffca28",
-    "Élevé": "#ff9800",
-    "Très élevé": "#e53935",
-    "Hors périmètre": "#3a3f47",
+    "Faible": FOREST_GREEN,
+    "Modéré": "#f6c445",
+    "Élevé": "#f2872e",
+    "Très élevé": "#e0453c",
+    "Hors périmètre": "#3c4f66",
 }
 RISK_ICONS = {"Faible": "🟢", "Modéré": "🟡", "Élevé": "🟠", "Très élevé": "🔴", "Hors périmètre": "⚪"}
 
@@ -99,7 +105,7 @@ st.markdown(f"""
     }}
     .topbar h1 {{
         font-size: 1.25rem; margin: 0; font-weight: 800; white-space: nowrap;
-        background: linear-gradient(90deg, #ffffff, #ffb347);
+        background: linear-gradient(90deg, #ffffff, #6bb6d8);
         -webkit-background-clip: text; -webkit-text-fill-color: transparent;
     }}
     .topbar .meta {{ color: #8b95a1; font-size: 0.72rem; line-height: 1.3; text-align: right; }}
@@ -423,13 +429,13 @@ def render_public_view():
     n_calm = int((forest_risk["risk_level"] == "Faible").sum())
 
     if n_high > 0:
-        banner_color, banner_icon = "#e5393522", "🔴"
+        banner_color, banner_icon = RISK_COLORS["Très élevé"] + "22", "🔴"
         banner_text = f"{n_high} wilaya{'s' if n_high > 1 else ''} en alerte incendie aujourd'hui"
     elif n_watch > 0:
-        banner_color, banner_icon = "#ffca2822", "🟡"
+        banner_color, banner_icon = RISK_COLORS["Modéré"] + "22", "🟡"
         banner_text = f"{n_watch} wilaya{'s' if n_watch > 1 else ''} sous surveillance, sans alerte majeure"
     else:
-        banner_color, banner_icon = "#4caf5022", "🟢"
+        banner_color, banner_icon = RISK_COLORS["Faible"] + "22", "🟢"
         banner_text = "Aucune wilaya en alerte incendie aujourd'hui"
 
     st.markdown(f"""
@@ -670,7 +676,8 @@ with tab_forecast:
             section_title("🔮", "Score heuristique à 7 jours")
             fig_outlook = go.Figure(go.Heatmap(
                 z=outlook.values, x=day_labels, y=outlook.index,
-                colorscale=[[0, "#2e7d32"], [0.25, "#4caf50"], [0.5, "#ffca28"], [0.75, "#ff9800"], [1, "#e53935"]],
+                colorscale=[[0, "#1e5c26"], [0.25, RISK_COLORS["Faible"]], [0.5, RISK_COLORS["Modéré"]],
+                            [0.75, RISK_COLORS["Élevé"]], [1, RISK_COLORS["Très élevé"]]],
                 zmin=0, zmax=100, colorbar=dict(title="Score", thickness=12),
                 hovertemplate="%{y} — %{x} : score %{z:.0f}/100<extra></extra>",
             ))
@@ -743,7 +750,7 @@ with tab_backtest:
                 ).reset_index()
                 fig_calib = go.Figure()
                 fig_calib.add_trace(go.Scatter(x=calib_g["pred"], y=calib_g["obs"] * 100, mode="lines+markers",
-                                                name="Observé", line=dict(color=ACCENT, width=2),
+                                                name="Observé", line=dict(color=FIRE_ACCENT, width=2),
                                                 marker=dict(size=8)))
                 fig_calib.add_trace(go.Scatter(x=[0, calib_g["pred"].max()], y=[0, calib_g["pred"].max()],
                                                 mode="lines", name="Calibration parfaite",
@@ -821,7 +828,7 @@ with tab_wilaya:
         monthly_temp = sel_ml.groupby("month")["temperature_2m_max"].mean().reindex(range(1, 13))
         fig_tf = go.Figure()
         fig_tf.add_trace(go.Bar(x=[MOIS_FR[m] for m in monthly.index], y=monthly.values,
-                                 name="Jours-feu", marker=dict(color=ACCENT), opacity=0.7))
+                                 name="Jours-feu", marker=dict(color=FIRE_ACCENT), opacity=0.7))
         fig_tf.add_trace(go.Scatter(x=[MOIS_FR[m] for m in monthly_temp.index], y=monthly_temp.values,
                                      name="Temp. max (°C)", yaxis="y2", line=dict(color="#ff5c5c", width=3)))
         chart_layout(fig_tf, 320, yaxis=dict(title="Jours-feu"),
@@ -857,7 +864,7 @@ with tab_trends:
     annual_summer_temp = summer.groupby("year")["temperature_2m_max"].mean()
 
     fig_trend = go.Figure()
-    bar_colors = ["#8a5a3b" if y < 2015 else ACCENT for y in annual_fire.index]
+    bar_colors = ["#8a5a3b" if y < 2015 else FIRE_ACCENT for y in annual_fire.index]
     fig_trend.add_trace(go.Bar(x=annual_fire.index, y=annual_fire.values, name="Jours-feu (cumul wilayas)",
                                 marker=dict(color=bar_colors), opacity=0.85))
     fig_trend.add_trace(go.Scatter(x=annual_summer_temp.index, y=annual_summer_temp.values,
@@ -918,7 +925,7 @@ with tab_corr:
         corr_series = pd.Series(corrs).sort_values()
         fig_corr = go.Figure(go.Bar(
             x=corr_series.values, y=corr_series.index, orientation="h",
-            marker=dict(color=["#e53935" if v > 0 else "#4fc3f7" for v in corr_series.values]),
+            marker=dict(color=[RISK_COLORS["Très élevé"] if v > 0 else "#4fc3f7" for v in corr_series.values]),
             text=[f"{v:+.3f}" for v in corr_series.values], textposition="outside",
         ))
         chart_layout(fig_corr, 460, margin=dict(t=20, l=8, r=70, b=8),
