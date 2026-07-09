@@ -446,6 +446,37 @@ def render_public_view():
     </div>
     """, unsafe_allow_html=True)
 
+    # KPI clés du jour, comparés à hier (dernière météo réellement observée
+    # dans le jeu de données, avant la prévision d'aujourd'hui)
+    yesterday_risk_df = compute_risk(ml, wilayas, LAST_DATE.month, None)
+    yesterday_forest = yesterday_risk_df[yesterday_risk_df["is_forest_zone"]]
+
+    n_max_today = int((forest_risk["risk_level"] == "Très élevé").sum())
+    n_max_yest = int((yesterday_forest["risk_level"] == "Très élevé").sum())
+
+    at_risk_today = forest_risk[forest_risk["risk_level"].isin(["Élevé", "Très élevé"])]
+    at_risk_yest = yesterday_forest[yesterday_forest["risk_level"].isin(["Élevé", "Très élevé"])]
+    temp_today = (at_risk_today["latest_temp"].mean() if len(at_risk_today) else forest_risk["latest_temp"].mean())
+    temp_yest = (at_risk_yest["latest_temp"].mean() if len(at_risk_yest) else yesterday_forest["latest_temp"].mean())
+
+    score_today = forest_risk["risk_score"].mean()
+    score_yest = yesterday_forest["risk_score"].mean()
+    if score_today - score_yest > 4:
+        trend_label, trend_delta = "En hausse", "Le risque augmente"
+    elif score_today - score_yest < -4:
+        trend_label, trend_delta = "En baisse", "Le risque diminue"
+    else:
+        trend_label, trend_delta = "Stable", "Situation stable"
+
+    kc1, kc2, kc3 = st.columns(3)
+    kc1.metric("🔴 Zones en alerte maximale", n_max_today,
+               delta=f"{n_max_today - n_max_yest:+d} vs hier" if n_max_today != n_max_yest else "= hier",
+               delta_color="inverse")
+    kc2.metric("🌡️ Température dans les zones à risque", f"{temp_today:.0f} °C",
+               delta=f"{temp_today - temp_yest:+.0f} °C vs hier", delta_color="inverse")
+    kc3.metric("📊 Tendance du risque", trend_label, delta=trend_delta, delta_color="off")
+    st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+
     col_map, col_search = st.columns([6, 4])
     with col_map:
         section_title("🗺️", "Carte du risque incendie en Algérie")
