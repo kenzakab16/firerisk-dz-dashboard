@@ -30,6 +30,58 @@ RISK_COLORS = {
 }
 RISK_ICONS = {"Faible": "🟢", "Modéré": "🟡", "Élevé": "🟠", "Très élevé": "🔴", "Hors périmètre": "⚪"}
 
+# ---------- Vue grand public : textes en langage courant ----------
+RISK_ADVICE = {
+    "Faible": (
+        "Risque faible aujourd'hui",
+        "Les conditions ne favorisent pas les départs de feu. Restez tout de même prudent avec le feu en forêt.",
+    ),
+    "Modéré": (
+        "Risque modéré aujourd'hui",
+        "Soyez vigilant : évitez de jeter des mégots ou d'allumer un feu près des zones boisées.",
+    ),
+    "Élevé": (
+        "Risque élevé aujourd'hui",
+        "Évitez tout feu en extérieur (barbecue, brûlage de déchets verts). Signalez immédiatement toute fumée suspecte.",
+    ),
+    "Très élevé": (
+        "Danger — risque très élevé aujourd'hui",
+        "N'allumez aucun feu, même à proximité des habitations. En cas de départ de feu, appelez sans attendre la Protection civile : 14.",
+    ),
+    "Hors périmètre": (
+        "Non concernée",
+        "Cette wilaya n'a pas de couverture forestière significative : le risque d'incendie de forêt n'y est pas évalué.",
+    ),
+}
+
+
+def qualify_temp(t):
+    if t >= 38:
+        return "très chaud"
+    if t >= 30:
+        return "chaud"
+    if t >= 20:
+        return "doux"
+    return "frais"
+
+
+def qualify_humidity(h):
+    if h < 25:
+        return "l'air est très sec"
+    if h < 45:
+        return "l'air est sec"
+    return "l'humidité est normale"
+
+
+def qualify_wind(w):
+    if w >= 35:
+        return "le vent souffle très fort"
+    if w >= 20:
+        return "le vent souffle fort"
+    if w >= 10:
+        return "il y a un peu de vent"
+    return "il n'y a presque pas de vent"
+
 st.markdown(f"""
 <style>
     .block-container {{
@@ -361,17 +413,154 @@ def backtest_recent(ml: pd.DataFrame, wilayas: pd.DataFrame, clim: pd.DataFrame,
 
     return df, window_start, window_end
 
-# ================= EN-TÊTE COMPACT =================
+
+def render_public_view():
+    """Vue grand public : langage courant, gros pictos, pas de jargon
+    (pas de score/percentile/corrélation/AUC). Carte + météo du jour +
+    conseils de prévention par wilaya."""
+    n_high = int((forest_risk["risk_level"].isin(["Très élevé", "Élevé"])).sum())
+    n_watch = int((forest_risk["risk_level"] == "Modéré").sum())
+    n_calm = int((forest_risk["risk_level"] == "Faible").sum())
+
+    if n_high > 0:
+        banner_color, banner_icon = "#e5393522", "🔴"
+        banner_text = f"{n_high} wilaya{'s' if n_high > 1 else ''} en alerte incendie aujourd'hui"
+    elif n_watch > 0:
+        banner_color, banner_icon = "#ffca2822", "🟡"
+        banner_text = f"{n_watch} wilaya{'s' if n_watch > 1 else ''} sous surveillance, sans alerte majeure"
+    else:
+        banner_color, banner_icon = "#4caf5022", "🟢"
+        banner_text = "Aucune wilaya en alerte incendie aujourd'hui"
+
+    st.markdown(f"""
+    <div style="background:{banner_color}; border:1px solid {BORDER}; border-radius:12px;
+                padding:18px 24px; margin-bottom:16px; display:flex; align-items:center; gap:14px;">
+        <span style="font-size:2rem;">{banner_icon}</span>
+        <div>
+            <div style="font-size:1.15rem; font-weight:800; color:#e8ebee;">{banner_text}</div>
+            <div style="font-size:0.8rem; color:#9aa4af;">
+                Situation au {RISK_DATE.strftime('%d/%m/%Y')} · {n_high} en alerte,
+                {n_watch} sous surveillance, {n_calm} calmes, sur les 36 wilayas à couvert forestier suivies.
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    col_map, col_search = st.columns([6, 4])
+    with col_map:
+        section_title("🗺️", "Carte du risque incendie en Algérie")
+        level_order = ["Faible", "Modéré", "Élevé", "Très élevé", "Hors périmètre"]
+        fig_map_pub = px.choropleth_mapbox(
+            risk_df, geojson=geojson, locations="wilaya_id", featureidkey="properties.wilaya_id",
+            color="risk_level", category_orders={"risk_level": level_order},
+            color_discrete_map=RISK_COLORS,
+            hover_name="wilaya_name", hover_data={"wilaya_id": False, "risk_level": True},
+            mapbox_style="carto-darkmatter", zoom=4.4, center={"lat": 32.5, "lon": 3.0}, opacity=0.8,
+            labels={"risk_level": "Niveau"},
+        )
+        fig_map_pub.update_layout(height=480, margin=dict(l=0, r=0, t=0, b=0), paper_bgcolor=CARD_BG,
+                                   legend=dict(orientation="h", y=-0.02, font=dict(color="#e8ebee", size=11)))
+        st.plotly_chart(fig_map_pub, use_container_width=True)
+        st.caption("🟢 Faible · 🟡 Modéré · 🟠 Élevé · 🔴 Très élevé · ⚪ Zone non forestière (non suivie)")
+
+    with col_search:
+        section_title("📍", "Ma wilaya")
+        all_names = sorted(wilayas["wilaya_name"])
+        default_idx = all_names.index("Tizi Ouzou") if "Tizi Ouzou" in all_names else 0
+        chosen = st.selectbox("Choisissez votre wilaya", all_names, index=default_idx, label_visibility="collapsed")
+        sel_row = risk_df[risk_df["wilaya_name"] == chosen].iloc[0]
+        title, advice = RISK_ADVICE[sel_row["risk_level"]]
+        icon = RISK_ICONS[sel_row["risk_level"]]
+        level_color = RISK_COLORS[sel_row["risk_level"]]
+
+        st.markdown(f"""
+        <div style="background:{CARD_BG}; border:1px solid {BORDER}; border-left:5px solid {level_color};
+                    border-radius:10px; padding:16px 18px; margin-bottom:12px;">
+            <div style="font-size:1.05rem; font-weight:800; color:#e8ebee;">{icon} {chosen} — {title}</div>
+            <div style="font-size:0.85rem; color:#c3cad2; margin-top:6px;">{advice}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        if sel_row["is_forest_zone"]:
+            t, h, w = sel_row["latest_temp"], sel_row["latest_humidity"], sel_row["latest_wind"]
+            st.markdown(f"""
+            <div style="background:{CARD_BG}; border:1px solid {BORDER}; border-radius:10px; padding:14px 18px;">
+                <div style="font-size:0.85rem; color:#c3cad2; line-height:1.7;">
+                    🌡️ Il va faire <b>{t:.0f}°C</b> ({qualify_temp(t)}) &nbsp;·&nbsp;
+                    💧 {qualify_humidity(h)} (<b>{h:.0f}%</b>) &nbsp;·&nbsp;
+                    💨 {qualify_wind(w)} (<b>{w:.0f} km/h</b>)
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            if forecast is not None:
+                fc_sel = forecast[forecast["wilaya_id"] == sel_row["wilaya_id"]].sort_values("date")
+                st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+                section_title("📅", "Les 7 prochains jours")
+                clim_w = clim[clim["wilaya_id"] == sel_row["wilaya_id"]]
+                fc_sel = fc_sel.copy()
+                fc_sel["month"] = fc_sel["date"].dt.month
+                fc_sel = fc_sel.merge(clim_w, on="month", how="left")
+                temp_z = (fc_sel["temperature_2m_max"] - fc_sel["temp_mean"]) / fc_sel["temp_std"]
+                hum_z = -(fc_sel["relative_humidity_2m_mean"] - fc_sel["hum_mean"]) / fc_sel["hum_std"]
+                wind_z = (fc_sel["wind_speed_10m_max"] - fc_sel["wind_mean"]) / fc_sel["wind_std"]
+                anomaly = np.clip((temp_z + hum_z + wind_z) / 3, -2, 2)
+                freq_pct_all = fc_sel["freq_fire"].rank(pct=True)
+                anomaly_pct_all = anomaly.rank(pct=True)
+                day_score = (0.55 * freq_pct_all + 0.45 * anomaly_pct_all) * 100
+                day_level = [score_to_level(s, True) for s in day_score]
+
+                chips = "".join(
+                    f"""<div style="display:inline-block; text-align:center; margin-right:8px; min-width:58px;">
+                        <div style="font-size:0.68rem; color:#9aa4af;">{JOURS_FR[d.weekday()]}</div>
+                        <div style="font-size:1.4rem;">{RISK_ICONS[lvl]}</div>
+                        <div style="font-size:0.62rem; color:#9aa4af;">{d.strftime('%d/%m')}</div>
+                    </div>"""
+                    for d, lvl in zip(fc_sel["date"], day_level)
+                )
+                st.markdown(f'<div style="white-space:nowrap; overflow-x:auto; padding:6px 0;">{chips}</div>',
+                             unsafe_allow_html=True)
+
+    st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+    st.caption(
+        "Ces informations sont calculées automatiquement à partir de la météo et de l'historique des incendies "
+        "détectés par satellite depuis 2000. Ce n'est **pas une prévision officielle** — en cas de doute ou "
+        "de départ de feu, contactez la Protection civile : **14**."
+    )
+
+
+# ================= EN-TÊTE COMPACT (commun aux deux vues) =================
 st.markdown(f"""
 <div class="topbar">
     <h1>🔥 FireRisk DZ</h1>
-    <div class="meta">
-        Risque évalué le {RISK_DATE.strftime('%d/%m/%Y')} ({WEATHER_SOURCE}) &nbsp;·&nbsp;
-        Historique feu à jour au {LAST_DATE.strftime('%d/%m/%Y')} &nbsp;·&nbsp;
-        Open-Meteo (ERA5) + NASA FIRMS (MODIS/VIIRS), 2000 → aujourd'hui
-    </div>
+    <div class="meta">Risque incendie de forêt en Algérie, par wilaya · mis à jour au {RISK_DATE.strftime('%d/%m/%Y')}</div>
 </div>
 """, unsafe_allow_html=True)
+
+# ================= BASCULE VUE SIMPLE / VUE EXPERTE =================
+if "view_mode" not in st.session_state:
+    st.session_state.view_mode = "public"
+
+tcol1, tcol2, _ = st.columns([1.4, 1.4, 7.2])
+with tcol1:
+    if st.button("👤 Vue simple", use_container_width=True,
+                 type="primary" if st.session_state.view_mode == "public" else "secondary"):
+        st.session_state.view_mode = "public"
+        st.rerun()
+with tcol2:
+    if st.button("🔬 Vue experte", use_container_width=True,
+                 type="primary" if st.session_state.view_mode == "expert" else "secondary"):
+        st.session_state.view_mode = "expert"
+        st.rerun()
+
+if st.session_state.view_mode == "public":
+    render_public_view()
+    st.stop()
+
+st.caption(
+    f"Vue experte · Risque évalué le {RISK_DATE.strftime('%d/%m/%Y')} ({WEATHER_SOURCE}) · "
+    f"Historique feu à jour au {LAST_DATE.strftime('%d/%m/%Y')} · Open-Meteo (ERA5) + NASA FIRMS (MODIS/VIIRS), 2000 → aujourd'hui"
+)
 
 # ================= NAVIGATION PAR ONGLETS =================
 tab_overview, tab_forecast, tab_backtest, tab_wilaya, tab_trends, tab_corr = st.tabs([
