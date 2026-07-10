@@ -36,6 +36,24 @@ RISK_COLORS = {
 }
 RISK_ICONS = {"Faible": "🟢", "Modéré": "🟡", "Élevé": "🟠", "Très élevé": "🔴", "Hors périmètre": "⚪"}
 
+# Paire catégorielle du volet Sirocco (validée daltonisme/contraste sur fond sombre) :
+# orange = vent de secteur sud, bleu = autres vents.
+SIROCCO_ORANGE = "#ee5f2a"
+OTHER_WIND_BLUE = "#3f7fc1"
+
+
+def is_south_wind(direction):
+    """Secteur sud (135-225°) : vent dominant de type sirocco."""
+    return (direction >= 135) & (direction < 225)
+
+
+def sirocco_forecast_flag(row):
+    """Conditions sirocco dangereuses sur une journée prévue : vent du sud
+    + chaleur + air sec (le triangle qui rend un départ de feu explosif)."""
+    return (is_south_wind(row["wind_direction_10m_dominant"])
+            and row["temperature_2m_max"] >= 33
+            and row["relative_humidity_2m_mean"] <= 30)
+
 # ---------- Vue grand public : textes en langage courant ----------
 RISK_ADVICE = {
     "Faible": (
@@ -420,6 +438,73 @@ def backtest_recent(ml: pd.DataFrame, wilayas: pd.DataFrame, clim: pd.DataFrame,
     return df, window_start, window_end
 
 
+# ---------- Analyse Sirocco : le triangle thermique ----------
+@st.cache_data
+def compute_sirocco_data(ml: pd.DataFrame, wilayas: pd.DataFrame):
+    """Prépare les données du volet Sirocco : jours de feu de la saison
+    (juin-oct), zone forestière, ère VIIRS (2015+, labels homogènes).
+    Retourne les jours de feu enrichis + agrégats par secteur de vent +
+    escalade d'intensité du triangle thermique."""
+    forest_ids = set(wilayas.loc[wilayas["is_forest_zone"], "wilaya_id"])
+    season = ml[(ml["wilaya_id"].isin(forest_ids)) & (ml["date"] >= "2015-01-01")
+                & (ml["month"].isin([6, 7, 8, 9, 10]))].copy()
+    fire = season[season["fire_detected"] == 1].copy()
+    fire["south"] = is_south_wind(fire["wind_direction_10m_dominant"])
+
+    # Fréquence d'occurrence (le sud ne déclenche PAS plus de feux — à afficher honnêtement)
+    occ_south = season[is_south_wind(season["wind_direction_10m_dominant"])]["fire_detected"].mean()
+    occ_all = season["fire_detected"].mean()
+
+    # Intensité par secteur (8 directions)
+    d = fire["wind_direction_10m_dominant"]
+    sectors = [("N", 337.5, 22.5), ("NE", 22.5, 67.5), ("E", 67.5, 112.5), ("SE", 112.5, 157.5),
+               ("S", 157.5, 202.5), ("SO", 202.5, 247.5), ("O", 247.5, 292.5), ("NO", 292.5, 337.5)]
+    sector_rows = []
+    for name, lo, hi in sectors:
+        m = ((d >= lo) & (d < hi)) if lo < hi else ((d >= lo) | (d < hi))
+        sector_rows.append({"secteur": name, "frp_moyen": fire.loc[m, "frp_total"].mean(),
+                            "n": int(m.sum()), "sud": name in ("SE", "S")})
+    sector_df = pd.DataFrame(sector_rows)
+
+    # Escalade du triangle thermique (intensité moyenne, jours de feu)
+    hot = fire["temperature_2m_max"] >= 35
+    dry = fire["relative_humidity_2m_mean"] <= 30
+    windy = fire["wind_speed_10m_max"] >= 25
+    ladder = pd.DataFrame([
+        {"étape": "Jour de feu ordinaire", "frp": fire[~hot & ~dry & ~windy]["frp_total"].mean(),
+         "n": int((~hot & ~dry & ~windy).sum())},
+        {"étape": "+ Chaud (≥35°C) et sec (≤30%)", "frp": fire[hot & dry]["frp_total"].mean(),
+         "n": int((hot & dry).sum())},
+        {"étape": "+ Vent fort (≥25 km/h)", "frp": fire[hot & dry & windy]["frp_total"].mean(),
+         "n": int((hot & dry & windy).sum())},
+        {"étape": "+ Vent du SUD (sirocco)", "frp": fire[hot & dry & windy & fire["south"]]["frp_total"].mean(),
+         "n": int((hot & dry & windy & fire["south"]).sum())},
+    ])
+
+    # Part du vent de sud élargi dans les journées les plus intenses
+    top50 = fire.nlargest(50, "frp_total")
+    top_share = float(((top50["wind_direction_10m_dominant"] >= 120)
+                       & (top50["wind_direction_10m_dominant"] < 240)).mean())
+    base_share = float(((season["wind_direction_10m_dominant"] >= 120)
+                        & (season["wind_direction_10m_dominant"] < 240)).mean())
+
+    # Échantillon pour le scatter : toutes les grosses journées + tirage du reste
+    big = fire.nlargest(500, "frp_total")
+    rest = fire.drop(big.index)
+    sample = pd.concat([big, rest.sample(min(2500, len(rest)), random_state=42)])
+    cols = ["date", "wilaya_name", "temperature_2m_max", "relative_humidity_2m_mean",
+            "wind_speed_10m_max", "wind_direction_10m_dominant", "frp_total", "nb_detections", "south"]
+    stats = {
+        "occ_south": occ_south, "occ_all": occ_all,
+        "frp_south": fire[fire["south"]]["frp_total"].mean(),
+        "frp_other": fire[~fire["south"]]["frp_total"].mean(),
+        "det_south": fire[fire["south"]]["nb_detections"].mean(),
+        "det_other": fire[~fire["south"]]["nb_detections"].mean(),
+        "top_share": top_share, "base_share": base_share,
+    }
+    return sample[cols], sector_df, ladder, stats
+
+
 # ---------- Fraîcheur du pipeline automatique ----------
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_pipeline_last_update():
@@ -606,16 +691,33 @@ def render_public_view():
                 day_score = (0.55 * freq_pct_all + 0.45 * anomaly_pct_all) * 100
                 day_level = [score_to_level(s, True) for s in day_score]
 
+                sirocco_days = [sirocco_forecast_flag(r) for _, r in fc_sel.iterrows()]
                 chips = "".join(
                     f"""<div style="display:inline-block; text-align:center; margin-right:8px; min-width:58px;">
                         <div style="font-size:0.68rem; color:#9aa4af;">{JOURS_FR[d.weekday()]}</div>
                         <div style="font-size:1.4rem;">{RISK_ICONS[lvl]}</div>
                         <div style="font-size:0.62rem; color:#9aa4af;">{d.strftime('%d/%m')}</div>
+                        <div style="font-size:0.7rem; height:14px;">{'🌬️' if sir else ''}</div>
                     </div>"""
-                    for d, lvl in zip(fc_sel["date"], day_level)
+                    for d, lvl, sir in zip(fc_sel["date"], day_level, sirocco_days)
                 )
                 st.markdown(f'<div style="white-space:nowrap; overflow-x:auto; padding:6px 0;">{chips}</div>',
                              unsafe_allow_html=True)
+
+                if any(sirocco_days):
+                    jours_sirocco = ", ".join(
+                        f"{JOURS_FR[d.weekday()]} {d.strftime('%d/%m')}"
+                        for d, sir in zip(fc_sel["date"], sirocco_days) if sir
+                    )
+                    st.markdown(f"""
+                    <div style="background:{SIROCCO_ORANGE}22; border:1px solid {SIROCCO_ORANGE};
+                                border-radius:10px; padding:12px 16px; margin-top:8px; font-size:0.82rem; color:#e8ebee;">
+                        🌬️ <b>Vent du Sud (sirocco) annoncé : {jours_sirocco}.</b><br>
+                        Ce vent chaud et sec venu du Sahara ne déclenche pas les feux, mais si un feu démarre,
+                        il peut le propager très vite. Vigilance maximale ces jours-là : aucun feu en extérieur,
+                        signalez immédiatement toute fumée (Protection civile : 14).
+                    </div>
+                    """, unsafe_allow_html=True)
 
     st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
     st.caption(
@@ -660,8 +762,8 @@ st.caption(
 )
 
 # ================= NAVIGATION PAR ONGLETS =================
-tab_overview, tab_forecast, tab_backtest, tab_wilaya, tab_trends, tab_corr = st.tabs([
-    "🗺️ Vue d'ensemble", "🔮 Prévisions & IA", "🎯 Backtesting", "📍 Détail par wilaya",
+tab_overview, tab_forecast, tab_sirocco, tab_backtest, tab_wilaya, tab_trends, tab_corr = st.tabs([
+    "🗺️ Vue d'ensemble", "🔮 Prévisions & IA", "🌬️ Sirocco", "🎯 Backtesting", "📍 Détail par wilaya",
     "📉 Tendances 2000-2026", "🔗 Corrélations & classement",
 ])
 
@@ -775,7 +877,96 @@ with tab_forecast:
     else:
         st.info("⚠️ API de prévision Open-Meteo injoignable — réessayez au prochain rechargement.")
 
-# ---------- Onglet 3 : Backtesting ----------
+# ---------- Onglet 3 : Sirocco & triangle thermique ----------
+with tab_sirocco:
+    scatter_df, sector_df, ladder, s_stats = compute_sirocco_data(ml, wilayas)
+
+    ratio_frp = s_stats["frp_south"] / s_stats["frp_other"]
+    ladder_ratio = ladder["frp"].iloc[3] / ladder["frp"].iloc[0]
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("🌬️ Intensité sous vent du Sud", f'{s_stats["frp_south"]:.0f} MW',
+              delta=f"×{ratio_frp:.1f} vs autres vents ({s_stats['frp_other']:.0f} MW)", delta_color="inverse")
+    m2.metric("📏 Étendue sous vent du Sud", f'{s_stats["det_south"]:.1f} foyers/jour',
+              delta=f"×{s_stats['det_south']/s_stats['det_other']:.1f} vs autres vents", delta_color="inverse")
+    m3.metric("🔺 Triangle complet (chaud+sec+vent+Sud)", f'{ladder["frp"].iloc[3]:.0f} MW',
+              delta=f"×{ladder_ratio:.0f} vs jour de feu ordinaire", delta_color="inverse")
+    m4.metric("🏆 Top 50 des pires journées", f'{s_stats["top_share"]*100:.0f}% sous vent de Sud',
+              delta=f"alors qu'il ne souffle que {s_stats['base_share']*100:.0f}% du temps", delta_color="inverse")
+
+    col_scatter, col_bars = st.columns([3, 2])
+
+    with col_scatter:
+        section_title("🔥", "Le triangle thermique : température × humidité × vent")
+        plot_df = scatter_df.copy()
+        plot_df["taille"] = np.clip(plot_df["frp_total"], 5, 2000)
+        fig_tri = go.Figure()
+        for south_val, name, color, op in [(False, "Autres vents", OTHER_WIND_BLUE, 0.45),
+                                            (True, "Vent du Sud (sirocco)", SIROCCO_ORANGE, 0.75)]:
+            sub = plot_df[plot_df["south"] == south_val]
+            fig_tri.add_trace(go.Scatter(
+                x=sub["temperature_2m_max"], y=sub["relative_humidity_2m_mean"],
+                mode="markers", name=name,
+                marker=dict(size=sub["taille"], sizemode="area",
+                            sizeref=2.0 * 2000 / (26.0 ** 2), sizemin=3,
+                            color=color, opacity=op, line=dict(width=0)),
+                customdata=np.stack([sub["wilaya_name"], sub["date"].dt.strftime("%d/%m/%Y"),
+                                     sub["frp_total"].round(0), sub["wind_speed_10m_max"].round(0)], axis=-1),
+                hovertemplate="<b>%{customdata[0]}</b> — %{customdata[1]}<br>"
+                              "Temp. max %{x:.0f}°C · Humidité %{y:.0f}%<br>"
+                              "FRP %{customdata[2]} MW · Vent %{customdata[3]} km/h<extra></extra>",
+            ))
+        # Zone critique chaud + sec
+        fig_tri.add_shape(type="rect", x0=35, x1=50, y0=0, y1=30, line=dict(width=0),
+                          fillcolor="rgba(238,95,42,0.07)")
+        fig_tri.add_annotation(x=44, y=4, text="zone critique : ≥35°C et ≤30% d'humidité",
+                               showarrow=False, font=dict(size=10, color=SIROCCO_ORANGE))
+        chart_layout(fig_tri, 560,
+                     xaxis=dict(title="Température max (°C)", gridcolor="rgba(140,180,220,0.08)"),
+                     yaxis=dict(title="Humidité relative (%)", gridcolor="rgba(140,180,220,0.08)"),
+                     legend=dict(orientation="h", y=1.08, font=dict(size=11)))
+        st.plotly_chart(fig_tri, use_container_width=True)
+        st.caption(
+            "Chaque point est une journée×wilaya avec feu détecté (saison juin-oct, 2015-2026, ~3 000 journées "
+            "affichées dont les 500 plus intenses). **Taille du point = puissance dégagée (FRP)**. Les grosses "
+            "journées oranges s'entassent dans le coin chaud/sec : c'est le triangle thermique du sirocco."
+        )
+
+    with col_bars:
+        section_title("🧭", "Intensité moyenne par direction du vent")
+        fig_sect = go.Figure(go.Bar(
+            x=sector_df["secteur"], y=sector_df["frp_moyen"],
+            marker=dict(color=[SIROCCO_ORANGE if s else OTHER_WIND_BLUE for s in sector_df["sud"]]),
+            text=[f"{v:.0f}" for v in sector_df["frp_moyen"]], textposition="outside",
+            customdata=sector_df["n"],
+            hovertemplate="Secteur %{x} : FRP moyen %{y:.0f} MW (%{customdata} jours de feu)<extra></extra>",
+        ))
+        chart_layout(fig_sect, 260, yaxis=dict(title="FRP moyen (MW)"), showlegend=False,
+                     margin=dict(t=28, l=8, r=8, b=8))
+        st.plotly_chart(fig_sect, use_container_width=True)
+
+        section_title("📶", "L'escalade du triangle")
+        ladder_colors = ["#7a8aa0", "#f2a06b", "#ee7a45", SIROCCO_ORANGE]
+        fig_ladder = go.Figure(go.Bar(
+            y=ladder["étape"], x=ladder["frp"], orientation="h",
+            marker=dict(color=ladder_colors),
+            text=[f"{v:.0f} MW" for v in ladder["frp"]], textposition="outside",
+            customdata=ladder["n"],
+            hovertemplate="%{y} : %{x:.0f} MW en moyenne (%{customdata} jours)<extra></extra>",
+        ))
+        chart_layout(fig_ladder, 240, xaxis=dict(title="FRP moyen (MW)", range=[0, ladder["frp"].max() * 1.3]),
+                     yaxis=dict(autorange="reversed", tickfont=dict(size=10)), showlegend=False)
+        st.plotly_chart(fig_ladder, use_container_width=True)
+
+    st.info(
+        f"**Ce que disent 11 saisons de données :** le vent du Sud ne déclenche pas plus de départs de feu "
+        f"({s_stats['occ_south']*100:.1f}% de jours-feu sous vent de Sud contre {s_stats['occ_all']*100:.1f}% en "
+        f"moyenne) — mais une fois le feu parti, il le transforme en brasier : air saharien brûlant et sec qui "
+        f"déshydrate la végétation et accélère la propagation. C'est le mécanisme des grands incendies de 2021 et "
+        f"2023 en Kabylie. La direction du vent fait partie des variables du modèle IA, et les journées "
+        f"sirocco prévues sont signalées dans la vue simple (⚠️ sur les 7 prochains jours)."
+    )
+
+# ---------- Onglet 4 : Backtesting ----------
 with tab_backtest:
     days_window = st.radio("Fenêtre", [7, 14, 30], index=1, horizontal=True, label_visibility="collapsed",
                             format_func=lambda d: f"{d} derniers jours")
@@ -853,7 +1044,7 @@ with tab_backtest:
             "prévision-vs-réel sera possible dans quelques semaines."
         )
 
-# ---------- Onglet 4 : Détail par wilaya ----------
+# ---------- Onglet 5 : Détail par wilaya ----------
 with tab_wilaya:
     forest_names = sorted(risk_df.loc[risk_df["is_forest_zone"], "wilaya_name"])
     default_idx = forest_names.index("Tizi Ouzou") if "Tizi Ouzou" in forest_names else 0
@@ -910,7 +1101,7 @@ with tab_wilaya:
         st.plotly_chart(fig_sel_annual, use_container_width=True)
     st.caption("Trait bleu : bascule capteur MODIS → VIIRS (2015), ~5× plus sensible — comptages non comparables avant/après.")
 
-# ---------- Onglet 5 : Tendances nationales ----------
+# ---------- Onglet 6 : Tendances nationales ----------
 with tab_trends:
     forest_ids = risk_df.loc[risk_df["is_forest_zone"], "wilaya_id"]
     forest_hist = ml[ml["wilaya_id"].isin(forest_ids)].copy()
@@ -967,7 +1158,7 @@ with tab_trends:
         st.plotly_chart(fig_heat, use_container_width=True)
         st.caption("Saison des feux (juin-octobre, pic juillet-août) et étés 2021/2023 nettement visibles.")
 
-# ---------- Onglet 6 : Corrélations & classement ----------
+# ---------- Onglet 7 : Corrélations & classement ----------
 with tab_corr:
     col_corr, col_table = st.columns([1, 2])
 
