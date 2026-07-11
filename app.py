@@ -311,6 +311,47 @@ def predict_fire_proba(model, fc: pd.DataFrame, wilayas: pd.DataFrame):
 
 ml_model, ml_meta = load_model()
 
+FEATURE_LABELS_FR = {
+    "temperature_2m_max": "🌡️ Température max", "temperature_2m_min": "Température min",
+    "temperature_2m_mean": "Température moyenne", "relative_humidity_2m_mean": "💧 Humidité relative",
+    "wind_speed_10m_max": "💨 Vitesse du vent", "wind_gusts_10m_max": "Rafales",
+    "wind_direction_10m_dominant": "🧭 Direction du vent", "precipitation_sum": "🌧️ Précipitations",
+    "rain_sum": "Pluie", "sunshine_duration": "☀️ Durée d'ensoleillement",
+    "shortwave_radiation_sum": "Rayonnement solaire", "et0_fao_evapotranspiration": "🌾 Évapotranspiration",
+    "surface_pressure_mean": "Pression de surface", "month_sin": "📅 Saison (mois)",
+    "month_cos": "📅 Saison (mois, 2)", "wilaya_id": "📍 Identité de la wilaya",
+    "centroid_lat": "Latitude", "centroid_lon": "Longitude", "area_km2": "Superficie",
+}
+
+
+@st.cache_data
+def compute_full_climatology(ml: pd.DataFrame):
+    """Moyennes mensuelles par wilaya de toutes les variables météo du
+    modèle — sert de point de référence 'journée normale' pour
+    l'explication locale par sensibilité."""
+    return ml.groupby(["wilaya_id", "month"])[MODEL_WEATHER_FEATURES].mean().reset_index()
+
+
+def explain_prediction(model, x_row: pd.DataFrame, clim_row: pd.Series):
+    """Explication locale par sensibilité : pour chaque variable météo,
+    on remplace la valeur du jour par sa normale mensuelle et on mesure
+    le déplacement de la probabilité. Contribution > 0 = la valeur du
+    jour pousse le risque au-dessus d'une journée normale. (Analyse de
+    sensibilité, pas des valeurs SHAP exactes — mais fidèle au modèle.)"""
+    base = float(model.predict_proba(x_row)[:, 1][0])
+    x_norm = x_row.copy()
+    for f in MODEL_WEATHER_FEATURES:
+        x_norm[f] = clim_row[f]
+    norm = float(model.predict_proba(x_norm)[:, 1][0])
+    contribs = []
+    for f in MODEL_WEATHER_FEATURES:
+        x_swap = x_row.copy()
+        x_swap[f] = clim_row[f]
+        p_swap = float(model.predict_proba(x_swap)[:, 1][0])
+        contribs.append({"feature": f, "delta": base - p_swap,
+                          "valeur_jour": float(x_row[f].iloc[0]), "normale": float(clim_row[f])})
+    return base, norm, pd.DataFrame(contribs)
+
 
 # ---------- Calcul du score de risque par wilaya ----------
 def score_to_level(s, is_forest):
@@ -868,12 +909,102 @@ with tab_forecast:
                 st.plotly_chart(fig_ml, use_container_width=True)
                 m = ml_meta["metrics"]
                 top3_ml = proba_matrix.mean(axis=1).head(3)
+                budget_note = ""
+                if "recall_at_budget" in m:
+                    budget_note = (f" En pratique : en surveillant chaque jour les {ml_meta.get('alert_budget', 8)} "
+                                   f"wilayas au score le plus élevé, {m['recall_at_budget']*100:.0f}% des feux sont "
+                                   f"couverts (précision {m['precision_at_budget']*100:.0f}%, contre "
+                                   f"{m['base_rate_test']*100:.0f}% au hasard).")
                 st.caption(
                     f"Gradient boosting, entraîné 2015-2023, testé 2024-2026 (ROC-AUC {m['roc_auc_test']:.2f}, "
                     f"taux de base {m['base_rate_test']*100:.0f}%). À risque : {', '.join(top3_ml.index)}."
+                    + budget_note
                 )
             else:
                 st.info("Modèle prédictif non trouvé (model_fire_risk_v1.joblib).")
+
+        # ---------- Explicabilité : pourquoi ce score ? ----------
+        if ml_model is not None:
+            st.divider()
+            col_global, col_local = st.columns([2, 3])
+
+            with col_global:
+                section_title("⚖️", "Ce que le modèle regarde (global)")
+                imp = ml_meta.get("permutation_importance")
+                if imp:
+                    imp_s = pd.Series(imp).sort_values(ascending=True).tail(10)
+                    labels = [FEATURE_LABELS_FR.get(f, f) for f in imp_s.index]
+                    fig_imp = go.Figure(go.Bar(
+                        x=imp_s.values, y=labels, orientation="h",
+                        marker=dict(color=ACCENT),
+                        hovertemplate="%{y} : perte de ROC-AUC %{x:.4f} si mélangée<extra></extra>",
+                    ))
+                    chart_layout(fig_imp, 380, xaxis=dict(title="Importance (perte de performance si variable brouillée)"),
+                                 showlegend=False, margin=dict(t=20, l=8, r=8, b=8))
+                    st.plotly_chart(fig_imp, use_container_width=True)
+                    st.caption(
+                        "Importance par permutation, mesurée sur la période test 2024-2026. L'identité de la wilaya "
+                        "(fréquence historique locale), la température et la saison dominent — le vent compte peu "
+                        "pour prédire *si* un feu démarre (il joue sur la propagation, cf. onglet Sirocco)."
+                    )
+                else:
+                    st.info("Importance des variables non disponible (méta du modèle à régénérer).")
+
+            with col_local:
+                section_title("🔍", "Pourquoi ce score aujourd'hui ? (par wilaya)")
+                forest_names_ml = sorted(preds["wilaya_name"].unique())
+                top1 = proba_matrix.index[0]
+                default_ml_idx = forest_names_ml.index(top1) if top1 in forest_names_ml else 0
+                sel_ml_name = st.selectbox("Wilaya à expliquer", forest_names_ml, index=default_ml_idx,
+                                            label_visibility="collapsed")
+                sel_wid = int(wilayas.loc[wilayas["wilaya_name"] == sel_ml_name, "wilaya_id"].iloc[0])
+
+                today_row = forecast[(forecast["wilaya_id"] == sel_wid)
+                                     & (forecast["date"] == forecast["date"].min())].iloc[[0]]
+                w_static = wilayas.loc[wilayas["wilaya_id"] == sel_wid].iloc[0]
+                x_row = today_row[MODEL_WEATHER_FEATURES].copy()
+                x_row["centroid_lat"] = w_static["centroid_lat"]
+                x_row["centroid_lon"] = w_static["centroid_lon"]
+                x_row["area_km2"] = w_static["area_km2"]
+                month_v = int(today_row["date"].dt.month.iloc[0])
+                x_row["month_sin"] = np.sin(2 * np.pi * month_v / 12)
+                x_row["month_cos"] = np.cos(2 * np.pi * month_v / 12)
+                forest_ids_sorted = sorted(wilayas.loc[wilayas["is_forest_zone"], "wilaya_id"])
+                x_row["wilaya_id"] = pd.Categorical([sel_wid], categories=forest_ids_sorted)
+
+                clim_full = compute_full_climatology(ml)
+                clim_row = clim_full[(clim_full["wilaya_id"] == sel_wid)
+                                     & (clim_full["month"] == month_v)].iloc[0]
+
+                base_p, norm_p, contribs = explain_prediction(ml_model, x_row, clim_row)
+                contribs["abs"] = contribs["delta"].abs()
+                top_c = contribs.nlargest(7, "abs").sort_values("delta")
+
+                def fmt_val(v):
+                    return f"{v:.1f}" if abs(v) < 10 else f"{v:.0f}"
+                bar_labels = [
+                    f"{FEATURE_LABELS_FR.get(r['feature'], r['feature'])} "
+                    f"({fmt_val(r['valeur_jour'])} vs {fmt_val(r['normale'])} d'habitude)"
+                    for _, r in top_c.iterrows()
+                ]
+                fig_local = go.Figure(go.Bar(
+                    x=top_c["delta"] * 100, y=bar_labels, orientation="h",
+                    marker=dict(color=[RISK_COLORS["Très élevé"] if v > 0 else "#4fc3f7" for v in top_c["delta"]]),
+                    text=[f"{v*100:+.1f} pt" for v in top_c["delta"]], textposition="outside",
+                ))
+                span = max(top_c["delta"].max(), 0.01) - min(top_c["delta"].min(), -0.01)
+                chart_layout(fig_local, 330,
+                             xaxis=dict(title="Effet sur la probabilité (points de %)",
+                                        range=[(min(top_c["delta"].min(), 0) - span * 0.25) * 100,
+                                               (max(top_c["delta"].max(), 0) + span * 0.25) * 100]),
+                             showlegend=False, margin=dict(t=20, l=8, r=60, b=8))
+                st.plotly_chart(fig_local, use_container_width=True)
+                st.caption(
+                    f"**{sel_ml_name} aujourd'hui : {base_p*100:.0f}% de probabilité de feu** — une journée "
+                    f"météo normale de ce mois donnerait {norm_p*100:.0f}%. Chaque barre montre l'effet de la "
+                    f"valeur du jour par rapport à la normale mensuelle (analyse de sensibilité fidèle au "
+                    f"modèle ; rouge = pousse le risque à la hausse, bleu = à la baisse)."
+                )
     else:
         st.info("⚠️ API de prévision Open-Meteo injoignable — réessayez au prochain rechargement.")
 
