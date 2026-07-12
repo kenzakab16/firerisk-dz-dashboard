@@ -128,6 +128,43 @@ st.markdown(f"""
     }}
     .topbar .meta {{ color: #8b95a1; font-size: 0.72rem; line-height: 1.3; text-align: right; }}
 
+    /* Messages d'état (erreur / avertissement / info / succès) : fond blanc
+       et texte sombre pour rester parfaitement lisibles sur le thème sombre,
+       sur toutes les vues et tous les onglets. Bord gauche coloré par type. */
+    div[data-testid="stAlert"] {{
+        background: #ffffff !important;
+        border: 1px solid #d5dbe3 !important;
+        border-radius: 10px !important;
+    }}
+    div[data-testid="stAlert"] p, div[data-testid="stAlert"] li,
+    div[data-testid="stAlert"] span, div[data-testid="stAlert"] div,
+    div[data-testid="stAlert"] strong, div[data-testid="stAlert"] em,
+    div[data-testid="stAlert"] code {{
+        color: #172033 !important;
+    }}
+    div[data-testid="stAlert"] a {{ color: #1d6fa5 !important; }}
+    div[data-testid="stAlert"] code {{ background: #eef1f5 !important; }}
+    div[data-testid="stAlert"]:has([data-testid="stAlertContentError"]) {{
+        border-left: 6px solid #e0453c !important;
+    }}
+    div[data-testid="stAlert"]:has([data-testid="stAlertContentWarning"]) {{
+        border-left: 6px solid #f6c445 !important;
+    }}
+    div[data-testid="stAlert"]:has([data-testid="stAlertContentInfo"]) {{
+        border-left: 6px solid {ACCENT} !important;
+    }}
+    div[data-testid="stAlert"]:has([data-testid="stAlertContentSuccess"]) {{
+        border-left: 6px solid {FOREST_GREEN} !important;
+    }}
+    /* Tracebacks Python (st.exception / erreurs non gérées) */
+    div[data-testid="stException"] {{
+        background: #ffffff !important;
+        border: 1px solid #e0453c !important;
+        border-left: 6px solid #e0453c !important;
+        border-radius: 10px !important;
+    }}
+    div[data-testid="stException"] * {{ color: #7a1f18 !important; }}
+
     div[data-testid="stMetric"] {{
         background: {CARD_BG}; border: 1px solid {BORDER}; border-top: 2px solid {ACCENT};
         border-radius: 8px; padding: 8px 12px 6px 12px;
